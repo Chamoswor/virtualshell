@@ -97,6 +97,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up QEMU for cross-arch Docker
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Python (host)
         uses: actions/setup-python@v5
         with:
@@ -161,14 +166,15 @@ jobs:
           python -m pip install -U pip
           python -m pip install cibuildwheel
 
-      - name: Build wheels with cibuildwheel (per-arch)
+      - name: Build wheels with cibuildwheel (universal2)
         env:
           CIBW_BUILD: ${{ matrix.python }}
-
           CIBW_ARCHS_MACOS: "universal2"
           CIBW_TEST_COMMAND: python -c "import virtualshell; print('ok')"
           CIBW_ENVIRONMENT_MACOS: >
             PYBIND11_FINDPYTHON=ON
+            CMAKE_OSX_ARCHITECTURES=arm64;x86_64
+            MACOSX_DEPLOYMENT_TARGET=11.0
         run: |
           python -m cibuildwheel --platform macos --output-dir wheelhouse .
 
