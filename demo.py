@@ -144,7 +144,7 @@ def example_progress_monitoring():
             - isComplete: True when the batch has finished
             - allResults: List of all ExecutionResults (filled at completion)
             """
-            msg = f"Progress: {progress.currentCommand}/{progress.totalCommands} - Last: {progress.lastResult.output.strip()}"
+            msg = f"Progress: {progress.currentCommand}/{progress.totalCommands} - Last: {progress.lastResult.out.strip()}"
             progress_updates.append(msg)
             print(f"  {msg}")
             
