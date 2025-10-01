@@ -209,9 +209,8 @@ Shell(initial_commands=[
 
 ---
 
-## Building from source (optional)
-
-You normally won’t need this when using wheels.
+# Building from source (advanced)
+Source builds require a C++ toolchain and CMake.
 
 **Prereqs:** Python ≥3.8, C++17, CMake ≥3.20, `scikit-build-core`, `pybind11`.
 
@@ -229,7 +228,7 @@ python -m pip install -e .
 ```
 
 * Linux wheels target **manylinux_2_28** (x86_64/aarch64).
-* macOS builds target **x86_64** and **arm64** (may be universal2).
+* macOS builds target **universal2** (x86_64 + arm64).
 
 ---
 
