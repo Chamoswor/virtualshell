@@ -133,7 +133,7 @@ jobs:
           overwrite: true
 
   wheels-macos:
-    name: Wheels (macOS universal2)
+    name: Wheels (macOS x86_64 + arm64)
     runs-on: macos-latest
     strategy:
       fail-fast: false
