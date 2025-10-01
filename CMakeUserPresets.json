@@ -1,0 +1,136 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "ninja-debug",
+      "displayName": "Ninja \u2022 Debug",
+      "description": "Single-config generator (GCC/Clang/MinGW).",
+      "inherits": "base",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ninja-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "ninja-release",
+      "displayName": "Ninja \u2022 Release",
+      "description": "Single-config generator (GCC/Clang/MinGW).",
+      "inherits": "base",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ninja-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "msvc-2022",
+      "displayName": "MSVC 2022 \u2022 x64 (multi-config)",
+      "description": "Visual Studio 17 2022 generator (Windows).",
+      "inherits": "base",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build/msvc-2022",
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      }
+    },
+    {
+      "name": "user",
+      "inherits": "base",
+      "hidden": false,
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      },
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/user"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "ninja-debug-build",
+      "displayName": "Build \u2022 ninja-debug",
+      "configurePreset": "ninja-debug"
+    },
+    {
+      "name": "ninja-release-build",
+      "displayName": "Build \u2022 ninja-release",
+      "configurePreset": "ninja-release"
+    },
+    {
+      "name": "msvc-2022-debug-build",
+      "displayName": "Build \u2022 msvc-2022 (Debug)",
+      "configurePreset": "msvc-2022",
+      "configuration": "Debug"
+    },
+    {
+      "name": "msvc-2022-release-build",
+      "displayName": "Build \u2022 msvc-2022 (Release)",
+      "configurePreset": "msvc-2022",
+      "configuration": "Release"
+    },
+    {
+      "name": "user-build",
+      "displayName": "Build \u2022 user",
+      "configurePreset": "user"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "ninja-debug-test",
+      "displayName": "CTest \u2022 ninja-debug",
+      "configurePreset": "ninja-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ninja-release-test",
+      "displayName": "CTest \u2022 ninja-release",
+      "configurePreset": "ninja-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "msvc-2022-debug-test",
+      "displayName": "CTest \u2022 msvc-2022 (Debug)",
+      "configurePreset": "msvc-2022",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "msvc-2022-release-test",
+      "displayName": "CTest \u2022 msvc-2022 (Release)",
+      "configurePreset": "msvc-2022",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "user-test",
+      "displayName": "CTest \u2022 user",
+      "configurePreset": "user",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ],
+  "vendor": {
+    "vscode": {
+      "cmake.configureOnOpen": false
+    }
+  }
+}

@@ -1,0 +1,61 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.9",
+  "pybind11>=2.12",
+  "setuptools_scm>=8",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "virtualshell"
+version = "0.1.2"
+description = "High-performance PowerShell bridge (C++ pybind11 backend)"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Kim-Andre Myrvold" }]
+requires-python = ">=3.8"
+keywords = ["powershell", "automation", "shell", "cpp", "pybind11"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: C++",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Homepage = "https://github.com/Chamoswor/virtualshell"
+Issues = "https://github.com/Chamoswor/virtualshell/issues"
+
+[tool.setuptools_scm]
+write_to = "src/virtualshell/_version.py"
+
+[tool.scikit-build]
+cmake.version = ">=3.20"
+cmake.build-type = "Release"
+ninja.make-fallback = true
+cmake.define = { PYBIND11_FINDPYTHON = "ON", CMAKE_CXX_STANDARD = "17", CMAKE_POSITION_INDEPENDENT_CODE = "ON" }
+
+[tool.scikit-build.sdist]
+include = ["src/virtualshell/**", "cpp/**", "CMakeLists.txt", "README.md", "LICENSE", "pyproject.toml"]
+exclude = [
+  "build/**", "dist/**", ".eggs/**", ".vs/**", ".vscode/**",
+  "cpp/build/**", "cpp/out/**",
+  "**/__pycache__/**", "**/*.o", "**/*.obj", "**/*.pdb", "**/*.pyd",
+  "**/*.dll", "**/*.so", "**/*.dylib", ".venv/*"
+]
+
+[tool.cibuildwheel]
+build = ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*", "cp313-*"]
+skip = "pp* *-musllinux_* *-win32 *-manylinux_i686 *-macosx_*"
+manylinux-x86_64-image = "manylinux2014"
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
