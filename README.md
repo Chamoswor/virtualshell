@@ -1,4 +1,3 @@
-````markdown
 # virtualshell
 
 High-performance Python façade over a **C++ PowerShell runner**.  
