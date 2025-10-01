@@ -124,8 +124,8 @@ By default you get a Python dataclass:
 ```python
 @dataclass(frozen=True)
 class ExecutionResult:
-    output: str
-    error: str
+    out: str
+    err: str
     exit_code: int
     success: bool
     execution_time: float
@@ -136,7 +136,7 @@ Pass `as_dataclass=False` to receive the raw C++ result object.
 ### Timeouts
 
 * Every method accepts a `timeout` (or `per_command_timeout`) in seconds.
-* On timeout: `success=False`, `exit_code=-1`, `error` contains `"timeout"`.
+* On timeout: `success=False`, `exit_code=-1`, `err` contains `"timeout"`.
 * Async futures resolve with the timeout result; late output is dropped in C++.
 
 ---
