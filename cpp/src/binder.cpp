@@ -221,8 +221,8 @@ PYBIND11_MODULE(_core, m) {
 
     // ExecutionResult
     py::class_<VirtualShell::ExecutionResult>(m, "ExecutionResult")
-        .def_readwrite("output", &VirtualShell::ExecutionResult::output)
-        .def_readwrite("error", &VirtualShell::ExecutionResult::error)
+        .def_readwrite("out", &VirtualShell::ExecutionResult::out)
+        .def_readwrite("err", &VirtualShell::ExecutionResult::err)
         .def_readwrite("exit_code", &VirtualShell::ExecutionResult::exitCode)
         .def_readwrite("success", &VirtualShell::ExecutionResult::success)
         .def_readwrite("execution_time", &VirtualShell::ExecutionResult::executionTime)
@@ -522,7 +522,7 @@ PYBIND11_MODULE(_core, m) {
     }, "Create a new VirtualShell instance", py::arg("config"));
 
     // Metadata
-    m.attr("__version__") = "0.1.2";
+    m.attr("__version__") = "1.0.0";
     m.attr("__author__")  = "Kim-Andre Myrvold";
 }
 

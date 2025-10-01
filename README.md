@@ -1,35 +1,35 @@
+````markdown
 # virtualshell
 
-High-performance Python façade over a **C++ PowerShell runner**.
-All heavy I/O (pipes, threads, timeouts, demux) is implemented in C++ for low latency and high throughput; Python exposes a thin API.
+High-performance Python façade over a **C++ PowerShell runner**.  
+A single long-lived PowerShell process is managed in C++, handling pipes, threads, timeouts and output demux; Python exposes a small, predictable API.
 
 ---
 
 ## Features
 
-* **Single persistent session** to `pwsh`/`powershell` (low overhead)
-* **Sync & async** execution (futures + optional callbacks)
-* **Script execution** with positional or named args
-* **Batch execution** with per-command timeout & early-stop
-* **Clean error model** with typed Python exceptions
-* **Context manager** (`with Shell(...)`) for lifecycle safety
+- **Persistent session** to `pwsh`/`powershell` (reuse modules, `$env:*`, functions, cwd)
+- **Sync & async** execution (Futures + optional callbacks)
+- **Script execution** (positional / named args, optional dot-sourcing)
+- **Batch** with per-command timeout & early-stop
+- **Clear failures** (typed exceptions), **context manager** lifecycle
 
 ---
 
 ## Install
 
 ```bash
-pip install virtualshell==0.1.2
-```
+pip install virtualshell
+````
 
-### Available distributions (Windows/Linux, amd64/x86_64)
+### Supported platforms
 
+* **Windows 10/11 x64**
+* **Linux**: x86_64 and aarch64 (manylinux_2_28 / glibc ≥ 2.28)
+* **macOS**: 12+ (x86_64 and arm64; universal2)
+* **Python**: 3.8 – 3.13
 
-> **Requirements**
->
-> * Windows 10/11 x64 | Linux x86_64
-> * PowerShell available as `pwsh` (preferred) or `powershell` on `PATH`
-> * Python 3.8–3.13 (matching the wheel you install)
+> Requires PowerShell on `PATH` (`pwsh` preferred, `powershell` also supported).
 
 ---
 
@@ -42,88 +42,75 @@ import virtualshell
 sh = virtualshell.Shell(timeout_seconds=5).start()
 
 # 1) One-liners (sync)
-res = sh.execute("Write-Output 'hello'")
-print(res.output.strip())  # -> hello
+res = sh.run("Write-Output 'hello'")
+print(res.out.strip())  # -> hello
 
+# 2) Async single command
+fut = sh.run_async("Write-Output 'async!'")
+print(fut.result().out.strip())
 
-# 3) Async single command
-fut = sh.execute_async("Write-Output 'async!'")
-print(fut.result().output.strip())
+# 3) Scripts with positional args
+r = sh.run_script(r"C:\temp\demo.ps1", args=["alpha", "42"])
+print(r.out)
 
-# 4) Scripts with positional args
-r = sh.execute_script(r"C:\temp\demo.ps1", args=["alpha", "42"])
-print(r.output)
+# 4) Scripts with named args
+r = sh.run_script_kv(r"C:\temp\demo.ps1", named_args={"Name":"Alice","Count":"3"})
+print(r.out)
 
-# 5) Scripts with named args
-r = sh.execute_script_kv(r"C:\temp\demo.ps1", named_args={"Name":"Alice", "Count":"3"})
-print(r.output)
-
-# 6) Context manager (auto-stop on exit)
+# 5) Context manager (auto-stop on exit)
 with virtualshell.Shell(timeout_seconds=3) as s:
-    print(s.execute("Write-Output 'inside with'").output.strip())
+    print(s.run("Write-Output 'inside with'").out.strip())
 
 sh.stop()
 ```
+
+Another example (stateful session):
 
 ```python
 from virtualshell import Shell
 with Shell(timeout_seconds=3) as sh:
-    sh.execute("function Inc { $global:i++; $global:i }")
-    nums = [sh.execute("Inc").output.strip() for _ in range(5)]
-    print(nums)  # -> ['1', '2', '3', '4', '5']
-
+    sh.run("function Inc { $global:i++; $global:i }")
+    nums = [sh.run("Inc").out.strip() for _ in range(5)]
+    print(nums)  # ['1','2','3','4','5']
 ```
 
 ---
 
-## Python API (high-level façade)
+## API (overview)
 
 ```python
 import virtualshell
-from virtualshell import ExecutionResult  # optional: Python dataclass view
+from virtualshell import ExecutionResult  # dataclass view
 
 sh = virtualshell.Shell(
-    powershell_path=None,             # optional explicit path to pwsh/powershell
-    working_directory=None,           # resolved to absolute path if provided
-    timeout_seconds=5.0,              # default per-command timeout
-    environment={"FOO":"BAR"},        # extra env vars for the child process
-    initial_commands=["$ErrorActionPreference='Stop'"]  # run after start()
-)
+    powershell_path=None,                     # optional explicit path
+    working_directory=None,                   # resolved to absolute path
+    timeout_seconds=5.0,                      # default per-command timeout
+    environment={"FOO": "BAR"},               # extra child env vars
+    initial_commands=["$ErrorActionPreference='Stop'"],  # post-start setup
+).start()
 
-sh.start()                            # idempotent, safe if already running
+# Sync
+res: ExecutionResult = sh.run("Get-Location | Select-Object -Expand Path")
 
-# --- Sync ---
-res: ExecutionResult = sh.execute("Get-Location | Select-Object -Expand Path")
-print(res.success, res.exit_code, res.output)
+# Scripts
+res = sh.run_script(r"/path/to/job.ps1", args=["--fast","1"])
+res = sh.run_script_kv(r"/path/to/job.ps1", named_args={"Mode":"Fast","Count":"1"})
+res = sh.run_script(r"/path/init.ps1", dot_source=True)
 
-res = sh.execute_script(r"C:\scripts\job.ps1", args=["--fast","1"])
-res = sh.execute_script_kv(r"C:\scripts\job.ps1", named_args={"Mode":"Fast","Count":"1"})
+# Async
+f = sh.run_async("Write-Output 'ping'")
+f2 = sh.run_async_batch(["$PSVersionTable", "Get-Random"])
 
-# Dotsource script
-res = sh.execute_script(r"C:\scripts\init.ps1", dot_source=True)
-
-# --- Async ---
-f = sh.execute_async("Write-Output 'ping'")
-print(f.result().output.strip())
-
-def on_done(r: ExecutionResult) -> None:
-    print("DONE:", r.success, r.output.strip())
-
-sh.execute_async("Write-Output 'callback!'", callback=on_done)
-
-# Async batch
-f2 = sh.execute_async_batch(["$PSVersionTable", "Get-Random"])
-print([r.success for r in f2.result()])
-
-# --- Convenience ---
-res = sh.pwsh("literal 'quoted' string")  # safely single-quote literal data
+# Convenience
+res = sh.pwsh("literal 'quoted' string")     # safe single-quoted literal
 
 sh.stop()
 ```
 
-### Return types
+### Return type
 
-By default, methods return a Python `ExecutionResult` dataclass:
+By default you get a Python dataclass:
 
 ```python
 @dataclass(frozen=True)
@@ -135,44 +122,39 @@ class ExecutionResult:
     execution_time: float
 ```
 
-Pass `as_dataclass=False` to receive the **raw C++ result object** for zero-copy scenarios.
+Pass `as_dataclass=False` to receive the raw C++ result object.
 
 ### Timeouts
 
-* Each API accepts a `timeout` (or `per_command_timeout`) in **seconds**.
-* On timeout, `success=False`, `exit_code=-1`, `error` contains `"timeout"`.
-* Async futures resolve with the timeout result; late output is discarded by the C++ layer.
+* Every method accepts a `timeout` (or `per_command_timeout`) in seconds.
+* On timeout: `success=False`, `exit_code=-1`, `error` contains `"timeout"`.
+* Async futures resolve with the timeout result; late output is dropped in C++.
 
 ---
 
-## Design goals (production-readiness)
+## Design notes
 
-* **Thin wrapper:** All heavy I/O and process orchestration live in C++ for performance.
-* **No surprises:** Stable API; no implicit state mutations beyond what is documented.
-* **Clear failure modes:** Dedicated exceptions and `raise_on_error` semantics.
-* **Thread-friendly:** Async methods return Futures and accept callbacks; no Python-side locks.
-* **Boundary hygiene:** Minimal data marshalling; explicit conversions for paths/args.
+* **Thin wrapper:** heavy I/O in C++; Python does orchestration only.
+* **No surprises:** stable API, documented side-effects.
+* **Clear failure modes:** `raise_on_error` and typed exceptions.
+* **Thread-friendly:** async returns Futures/callbacks; no Python GIL-level locking.
+* **Boundary hygiene:** explicit path/arg conversions, minimal marshalling.
 
-### Security notes
+### Security
 
-* The wrapper **does not sanitize** raw commands. Only `pwsh()` uses literal single-quoting to protect data as arguments.
-* Do **not** pass untrusted strings to `execute*` without proper quoting/sanitization.
-* Environment injection happens via the `Shell` config; avoid secrets in logs/tracebacks.
+* The wrapper **does not sanitize** raw commands. Only `pwsh()` applies literal single-quoting for data.
+* Don’t pass untrusted strings to `run*` without proper quoting/sanitization.
+* Avoid logging secrets; env injection happens via `Shell(..., environment=...)`.
 
-### Performance notes
+### Performance
 
-* Sync/async routes call into C++ directly; Python overhead is mostly object allocation and callback dispatch.
-* Prefer **batch** or **async** when issuing many small commands to amortize round-trips.
+* Sync/async routes call into C++ directly; Python overhead is object creation + callback dispatch.
+* Prefer **batch/async** for many small commands to amortize round-trips.
 
 ### Lifetime
 
-* `Shell.start()` initializes/ensures a running backend; `Shell.stop()` tears it down.
-* `with Shell(...) as sh:` guarantees **stop-on-exit**, even on exceptions.
-
-### Compatibility
-
-* The C++ layer may expose both `snake_case` and `camelCase`.
-* `ExecutionResult.from_cpp()` normalizes fields to keep ABI compatibility.
+* `Shell.start()` ensures a running backend; `Shell.stop()` tears it down.
+* `with Shell(...)` guarantees stop-on-exit, even on exceptions.
 
 ---
 
@@ -180,29 +162,34 @@ Pass `as_dataclass=False` to receive the **raw C++ result object** for zero-copy
 
 ```python
 from virtualshell.errors import (
-    SmartShellError,
+    VirtualShellError,
     PowerShellNotFoundError,
     ExecutionTimeoutError,
     ExecutionError,
 )
 
 try:
-    res = sh.execute("throw 'boom'", raise_on_error=True)
+    res = sh.run("throw 'boom'", raise_on_error=True)
 except ExecutionTimeoutError:
     ...
 except ExecutionError as e:
-    print("PS failed:", e)
+    print("PowerShell failed:", e)
 ```
 
-* `ExecutionTimeoutError` is raised when `exit_code == -1` and the error mentions `timeout`, **if** `raise_on_error=True`.
-* Otherwise APIs return an `ExecutionResult` with `success=False`.
+* `ExecutionTimeoutError` is raised on timeouts **if** `raise_on_error=True`.
+* Otherwise, APIs return `ExecutionResult(success=False)`.
 
 ---
 
 ## Configuration tips
 
-* If `pwsh`/`powershell` isn’t on `PATH`, pass `powershell_path` to `Shell(...)`.
-* Use `initial_commands` for per-session setup, e.g. UTF-8:
+If PowerShell isn’t on `PATH`, pass `powershell_path`:
+
+```python
+Shell(powershell_path=r"C:\Program Files\PowerShell\7\pwsh.exe")
+```
+
+Session setup example:
 
 ```python
 Shell(initial_commands=[
@@ -213,107 +200,43 @@ Shell(initial_commands=[
 
 ---
 
-## Building from source (advanced)
+## Building from source (optional)
 
-You typically don’t need this when using wheels, but if you want to build locally:
+You normally won’t need this when using wheels.
 
-### Prerequisites
-
-* **Python** ≥ 3.8 with dev headers
-* **C++17** compiler
-* **CMake** ≥ 3.20
-* **Build backend:** [`scikit-build-core`](https://github.com/scikit-build/scikit-build-core) + [`pybind11`](https://pybind11.readthedocs.io/)
-* **Windows:** MSVC (VS 2019/2022)
-* **Linux:** GCC/Clang (Linux wheels not verified yet)
-
-The project is already configured via **`pyproject.toml`** and **`CMakeLists.txt`**. The compiled extension is installed as **`virtualshell._core`**, so `import virtualshell` works out of the box.
-
-### One-shot local build (recommended)
+**Prereqs:** Python ≥3.8, C++17, CMake ≥3.20, `scikit-build-core`, `pybind11`.
 
 ```bash
 # in repo root
 python -m pip install -U pip build
-python -m build  # produces sdist and wheel under ./dist
+python -m build           # -> dist/*.whl, dist/*.tar.gz
 python -m pip install dist/virtualshell-*.whl
 ```
 
-### Editable/dev install
+Editable install:
 
 ```bash
-python -m pip install -U pip
-python -m pip install -e .  # uses scikit-build-core to build the C++ extension
+python -m pip install -e .
 ```
 
-### Platform notes
-
-**Windows (x64)**
-
-* Visual Studio 2022 generator is used by default (see `[tool.scikit-build.cmake]` in `pyproject.toml`).
-* If you have multiple VS versions, ensure the correct **x64** toolchain is active (Developer Command Prompt or `vcvars64.bat`).
-
-**Linux (x86_64)**
-
-* Source builds work with a recent GCC/Clang + CMake.
-* Prebuilt manylinux wheels are **not** published yet; CI configuration exists, but the Linux runtime matrix is still being validated.
-
-### Build configuration
-
-Most options are declared in `pyproject.toml`:
-
-* **Backend:** `scikit_build_core.build`
-* **Build args:** CMake generator and `PYBIND11_FINDPYTHON=ON` are set (auto-discovers the active Python).
-* **Wheel layout:** packaged under `src/virtualshell/`
-* **Versioning:** `setuptools_scm` writes `src/virtualshell/_version.py` from Git tags.
-
-You can override or pass extra CMake definitions at build time if needed:
-
-```bash
-# Example: switch generator or tweak parallelism
-SCIKIT_BUILD_VERBOSE=1 \
-CMAKE_BUILD_PARALLEL_LEVEL=8 \
-python -m build
-```
-
-### Smoke test after build
-
-```bash
-python - << 'PY'
-import virtualshell
-s = virtualshell.Shell(timeout_seconds=2)
-print("import_ok:", bool(s._core))
-# Optional: only if PowerShell is available on PATH
-# if s.start().is_running:
-#     print("exec_ok:", virtualshell.Shell().start().execute("Write-Output 'ok'").success)
-PY
-```
-
-### Troubleshooting
-
-* **Cannot find MSVC/CMake:** open a *Developer Command Prompt for VS 2022* or ensure `cmake` and the MSVC toolchain are on `PATH`.
-* **ImportError: cannot import name `_core`:** the extension didn’t build or wasn’t placed under `virtualshell/_core.*`. Reinstall (`python -m pip install -e .` or `python -m build && pip install dist/*.whl`).
-* **PowerShell not found at runtime:** pass an explicit path: `Shell(powershell_path=r"C:\Program Files\PowerShell\7\pwsh.exe")`.
+* Linux wheels target **manylinux_2_28** (x86_64/aarch64).
+* macOS builds target **x86_64** and **arm64** (may be universal2).
 
 ---
 
 ## Roadmap
 
 * ✅ Windows x64 wheels (3.8–3.13)
-* ✅ Linux x64 wheels (manylinux)
+* ✅ Linux x64/aarch64 wheels (manylinux_2_28)
+* ✅ macOS x86_64/arm64 wheels
 * ⏳ Streaming APIs and richer progress events
-* ✅ Packaging polish (`pyproject`, build matrices, GitHub Actions)
 
 ---
 
 ## License
 
-Apache 2.0, see [LICENSE](LICENSE) for details.
+Apache 2.0 — see [LICENSE](LICENSE).
 
 ---
 
-## Acknowledgments
-
-* Built with `pybind11`, and a lot of care around cross-platform pipes & process control.
-
----
-
-*If you hit issues, please open an issue with your Python version, OS, `pwsh`/`powershell` path, and a minimal repro.*
+*Issues & feedback are welcome. Please include Python version, OS, your PowerShell path (`pwsh`/`powershell`), and a minimal repro.*

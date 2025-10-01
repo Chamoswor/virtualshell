@@ -13,22 +13,22 @@ def example_concurrent_work():
     with Shell() as sh:
         # Set up a PowerShell function that takes some time to execute
         print("Setting up PowerShell function with 10 ms delay per increment...")
-        sh.execute("function SlowInc { Start-Sleep -Milliseconds 10; $global:i += 1; $global:i }")
-        sh.execute("$global:i = 0")
-        
+        sh.run("function SlowInc { Start-Sleep -Milliseconds 10; $global:i += 1; $global:i }")
+        sh.run("$global:i = 0")
+
         # Results storage
         async_results = []
         work_done = []
         
         def async_callback(r: ExecutionResult) -> None:
             """Callback called when async execution completes"""
-            print(f"✓ Async PowerShell completed! Final value: {r.output.strip()}")
-            async_results.append(r.output.strip())
-        
+            print(f"✓ Async PowerShell completed! Final value: {r.out.strip()}")
+            async_results.append(r.out.strip())
+
         # Start a long-running PowerShell command asynchronously
         print("Starting async PowerShell execution (1000 increments)...")
         to_run = "SlowInc;" * 1000
-        future = sh.execute_async(to_run, callback=async_callback)
+        future = sh.run_async(to_run, callback=async_callback)
         
         print("Now doing other work while PowerShell runs in background..., max 50 iterations")
         
@@ -71,7 +71,7 @@ def example_multiple_async_tasks():
     
     with Shell(timeout_seconds=30) as sh:
         # Set up different PowerShell functions
-        sh.execute("""
+        sh.run("""
         function CountUp($max) { 
             for($i=1; $i -le $max; $i++) { 
                 Start-Sleep -Milliseconds 5
@@ -90,15 +90,15 @@ def example_multiple_async_tasks():
         
         def make_callback(task_name):
             def callback(r: ExecutionResult):
-                results[task_name] = r.output.strip()
-                print(f"✓ {task_name} completed: {r.output.strip()}")
+                results[task_name] = r.out.strip()
+                print(f"✓ {task_name} completed: {r.out.strip()}")
             return callback
         
         # Start multiple async tasks
         print("Starting multiple async tasks...")
-        future1 = sh.execute_async("CountUp 100", callback=make_callback("CountUp"))
-        future2 = sh.execute_async("CountDown 150", callback=make_callback("CountDown"))
-        
+        future1 = sh.run_async("CountUp 100", callback=make_callback("CountUp"))
+        future2 = sh.run_async("CountDown 150", callback=make_callback("CountDown"))
+
         # Do work while both run
         print("Doing work while both tasks run...")
         work_counter = 0
@@ -154,7 +154,7 @@ def example_progress_monitoring():
             #     print(f"  All results count: {len(progress.allResults)}")
         
         print("Starting batch execution with progress monitoring...")
-        future = sh.execute_async_batch(
+        future = sh.run_async_batch(
             commands, 
             progress=progress_callback,
             stop_on_first_error=False
@@ -184,7 +184,7 @@ def example_python_vs_powershell_race(numbers_to_compute=20):
         # Set up PowerShell function for computation
         print("Setting up PowerShell computation function...")
 
-        sh.execute("""
+        sh.run("""
         function ComputeFactorials($max) {
             $sum = [System.Numerics.BigInteger]::Zero
             for($i = 1; $i -le $max; $i++) {
@@ -214,7 +214,7 @@ def example_python_vs_powershell_race(numbers_to_compute=20):
         
         def powershell_callback(r: ExecutionResult) -> None:
             nonlocal powershell_result, powershell_finished, race_winner
-            powershell_result = int(r.output.strip())
+            powershell_result = int(r.out.strip())
             powershell_finished = True
             if not python_finished:
                 race_winner = "PowerShell"
@@ -225,7 +225,7 @@ def example_python_vs_powershell_race(numbers_to_compute=20):
         
         # Start PowerShell computation
         powershell_command = f"ComputeFactorials {max_number}"
-        future = sh.execute_async(powershell_command, callback=powershell_callback)
+        future = sh.run_async(powershell_command, callback=powershell_callback)
         
         # Start Python computation
         print("🚀 Race started!")

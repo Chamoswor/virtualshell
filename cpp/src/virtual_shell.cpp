@@ -582,7 +582,7 @@ VirtualShell::execute(const std::string& command, double timeoutSeconds)
     // Timeout path: return a synthetic timeout result immediately.
     // NOTE: The underlying command may still complete later; parser must ignore late chunks
     // for this command. Ensure submit()/timeoutScan_ marks the CmdState as "timed out".
-    ExecutionResult r{}; r.success=false; r.exitCode=-1; r.error="timeout";
+    ExecutionResult r{}; r.success=false; r.exitCode=-1; r.err="timeout";
     return r;
 }
 
@@ -605,7 +605,7 @@ VirtualShell::ExecutionResult VirtualShell::execute_script(
 
     if (!fs::exists(abs)) {
         ExecutionResult r{};
-        r.error    = "Could not open script file: " + scriptPath;
+        r.err    = "Could not open script file: " + scriptPath;
         r.exitCode = -1;
         r.success  = false;
         return r;
@@ -657,7 +657,7 @@ VirtualShell::executeAsync_script(std::string scriptPath,
         ExecutionResult r{};
         r.success  = false;
         r.exitCode = -1;
-        r.error    = "Could not open script file: " + scriptPath;
+        r.err    = "Could not open script file: " + scriptPath;
         p.set_value(std::move(r)); // Fulfill immediately so caller's future becomes ready.
         return p.get_future();
     }
@@ -772,7 +772,7 @@ VirtualShell::executeAsync_batch(std::vector<std::string> commands,
                 } else {
                     r.success  = false;
                     r.exitCode = -1;
-                    r.error    = "timeout";
+                    r.err    = "timeout";
                 }
             } else {
                 // No explicit timeout: wait until completion
@@ -810,7 +810,7 @@ VirtualShell::ExecutionResult VirtualShell::execute_script_kv(
     fs::path abs = fs::absolute(scriptPath);
     if (!fs::exists(abs)) {
         ExecutionResult r{};
-        r.error = "Could not open script file: " + scriptPath;
+        r.err = "Could not open script file: " + scriptPath;
         r.exitCode = -1; r.success = false;
         return r;
     }
@@ -856,7 +856,7 @@ VirtualShell::executeAsync_script_kv(std::string scriptPath,
         ExecutionResult r{};
         r.success  = false;
         r.exitCode = -1;
-        r.error    = "Could not open script file: " + scriptPath;
+        r.err    = "Could not open script file: " + scriptPath;
         p.set_value(std::move(r));
         return p.get_future();
     }
@@ -1134,7 +1134,7 @@ std::string VirtualShell::getWorkingDirectory() {
         "[IO.Path]::GetFullPath((Get-Location -PSProvider FileSystem).Path)";
     ExecutionResult r = execute(cmd);
     if (!r.success) return "";
-    std::string path = r.output;
+    std::string path = r.out;
     trim_inplace(path); // Normalize trailing newline/whitespace from PS output.
     return path;
 }
@@ -1154,7 +1154,7 @@ std::string VirtualShell::getEnvironmentVariable(const std::string& name) {
         "[Environment]::GetEnvironmentVariable(" + ps_quote(name) + ", 'Process')";
     ExecutionResult r = execute(cmd);
     if (!r.success) return "";
-    std::string val = r.output;
+    std::string val = r.out;
     trim_inplace(val); // Strip PS newline/whitespace.
     return val;
 }
@@ -1164,7 +1164,7 @@ bool VirtualShell::isModuleAvailable(const std::string& moduleName) {
     // use ps_quote(moduleName) if you expect spaces/special chars.
     std::string command = "Get-Module -ListAvailable -Name '" + moduleName + "'";
     ExecutionResult result = execute(command);
-    return result.success && !result.output.empty(); // Non-empty output => module found.
+    return result.success && !result.out.empty(); // Non-empty output => module found.
 }
 
 bool VirtualShell::importModule(const std::string& moduleName) {
@@ -1177,7 +1177,7 @@ bool VirtualShell::importModule(const std::string& moduleName) {
 std::string VirtualShell::getPowerShellVersion() {
     ExecutionResult result = execute("$PSVersionTable.PSVersion.ToString()");
     if (result.success) {
-        std::string version = result.output;
+        std::string version = result.out;
         // Trim whitespace (could also use trim_inplace for consistency with other helpers).
         version.erase(version.find_last_not_of(" \t\r\n") + 1);
         version.erase(0, version.find_first_not_of(" \t\r\n"));
@@ -1191,7 +1191,7 @@ std::vector<std::string> VirtualShell::getAvailableModules() {
     ExecutionResult result = execute("Get-Module -ListAvailable | Select-Object -ExpandProperty Name | Sort-Object -Unique");
     
     if (result.success) {
-        std::istringstream iss(result.output);
+        std::istringstream iss(result.out);
         std::string line;
         while (std::getline(iss, line)) {
             // Trim whitespace
@@ -1572,7 +1572,7 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
     if (!isRunning_) {
         // Process not running: fulfill a ready future with an error result.
         std::promise<ExecutionResult> p; ExecutionResult r{};
-        r.error   = "PowerShell process is not running";
+        r.err   = "PowerShell process is not running";
         r.exitCode= -1;
         r.success = false;
         p.set_value(std::move(r));
@@ -1725,8 +1725,8 @@ void VirtualShell::completeCmdLocked_(CmdState& S, bool success) {
     ExecutionResult r{};
     r.success = success && !S.timedOut.load(); // A timed-out command cannot be reported as success.
     r.exitCode = r.success ? 0 : -1;
-    r.output   = std::move(S.outBuf);
-    r.error    = std::move(S.errBuf);
+    r.out   = std::move(S.outBuf);
+    r.err    = std::move(S.errBuf);
     r.executionTime = std::chrono::duration<double>(now - S.tStart).count();
 
     // Resolve the promise first (primary completion path).
@@ -1763,7 +1763,7 @@ void VirtualShell::timeoutOne_(uint64_t id) {
     ExecutionResult r{};
     r.success  = false;
     r.exitCode = -1;
-    r.error    = "timeout";
+    r.err    = "timeout";
     // NOTE: If you want late stdout/stderr to be ignored, ensure the reader
     // checks S.timedOut or absence from inflight_ before appending.
 

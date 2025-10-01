@@ -72,8 +72,8 @@ public:
      * @brief Result of a PowerShell command.
      */
     struct ExecutionResult {
-        std::string output;        ///< Stdout from the command
-        std::string error;         ///< Stderr from the command
+        std::string out;        ///< Stdout from the command
+        std::string err;        ///< Stderr from the command
         int         exitCode;      ///< Exit code (0 = success)
         bool        success;       ///< Whether the command completed successfully
         double      executionTime; ///< Execution time in seconds

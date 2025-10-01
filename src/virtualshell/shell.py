@@ -158,8 +158,8 @@ class ExecutionResult:
     Use this class when you need a stable Pythonic type. If you require the raw C++
     object (e.g., for zero-copy interop), pass `as_dataclass=False` to public APIs.
     """
-    output: str
-    error: str
+    out: str
+    err: str
     exit_code: int
     success: bool
     execution_time: float
@@ -168,8 +168,8 @@ class ExecutionResult:
     def from_cpp(cls, r: _CPP_ExecResult) -> "ExecutionResult":
         # Attribute access is defensive to tolerate ABI field name differences.
         return cls(
-            output=getattr(r, "output", ""),
-            error=getattr(r, "error", ""),
+            out=getattr(r, "output", ""),
+            err=getattr(r, "error", ""),
             exit_code=int(getattr(r, "exit_code", getattr(r, "exitCode", -1))),
             success=bool(getattr(r, "success", False)),
             execution_time=float(getattr(r, "execution_time", getattr(r, "executionTime", 0.0))),
@@ -265,7 +265,7 @@ class Shell:
         return bool(self._core.is_alive())
 
     # -------- sync --------
-    def execute(
+    def run(
         self,
         command: str,
         timeout: Optional[float] = None,
@@ -291,7 +291,7 @@ class Shell:
         _raise_on_failure(res, raise_on_error=raise_on_error, label="Command", timeout_used=to)
         return ExecutionResult.from_cpp(res) if as_dataclass else res
 
-    def execute_script(
+    def run_script(
         self,
         script_path: Union[str, Path],
         args: Optional[Iterable[str]] = None,
@@ -320,7 +320,7 @@ class Shell:
         _raise_on_failure(res, raise_on_error=raise_on_error, label="Script", timeout_used=to)
         return ExecutionResult.from_cpp(res) if as_dataclass else res
 
-    def execute_script_kv(
+    def run_script_kv(
         self,
         script_path: Union[str, Path],
         named_args: Optional[Dict[str, str]] = None,
@@ -346,7 +346,7 @@ class Shell:
         _raise_on_failure(res, raise_on_error=raise_on_error, label="ScriptKV", timeout_used=to)
         return ExecutionResult.from_cpp(res) if as_dataclass else res
 
-    def execute_batch(
+    def run_batch(
         self,
         commands: Iterable[str],
         *,
@@ -369,7 +369,7 @@ class Shell:
             return [ExecutionResult.from_cpp(r) for r in vec]
         return vec
 
-    def execute_async(self, command: str, callback: Optional[Callable[[ExecutionResult], None]] = None, *, as_dataclass: bool = True):
+    def run_async(self, command: str, callback: Optional[Callable[[ExecutionResult], None]] = None, *, as_dataclass: bool = True):
         """Asynchronously execute a single command.
 
         - If `callback` is provided, it is invoked on completion with the result type
@@ -390,7 +390,7 @@ class Shell:
         c_fut = self._core.execute_async(command=command, callback=_cb if callback else None)
         return _map_future(c_fut, lambda r: ExecutionResult.from_cpp(r)) if as_dataclass else c_fut
 
-    def execute_async_batch(
+    def run_async_batch(
         self,
         commands: Iterable[str],
         progress: Optional[Callable[[ _CPP_BatchProg ], None]] = None,
@@ -416,7 +416,7 @@ class Shell:
             return _map_future(fut, lambda vec: [ExecutionResult.from_cpp(r) for r in vec])
         return fut
 
-    def execute_async_script(
+    def run_async_script(
         self,
         script_path: Union[str, Path],
         args: Optional[Iterable[str]] = None,
@@ -453,7 +453,7 @@ class Shell:
             return _map_future(fut, lambda r: ExecutionResult.from_cpp(r))
         return fut
 
-    def execute_async_script_kv(
+    def run_async_script_kv(
         self,
         script_path: Union[str, Path],
         named_args: Optional[Dict[str, str]] = None,
@@ -501,7 +501,7 @@ class Shell:
             `shell.pwsh("Hello 'World'")` -> runs `Write-Output 'Hello ''World'''` semantics;
             here we only quote the literal; you still provide the full command.
         """
-        return self.execute(quote_pwsh_literal(s), timeout=timeout, raise_on_error=raise_on_error)
+        return self.run(quote_pwsh_literal(s), timeout=timeout, raise_on_error=raise_on_error)
 
     def __enter__(self) -> "Shell":
         """Context manager entry: ensure backend is running."""
