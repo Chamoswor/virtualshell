@@ -141,22 +141,22 @@ jobs:
         include:
           - python: "cp38-*"
             label: "cp38"
-            mac_target: "10.15"
+            mac_target: "11.0"
           - python: "cp39-*"
             label: "cp39"
-            mac_target: "10.15"
+            mac_target: "11.0"
           - python: "cp310-*"
             label: "cp310"
-            mac_target: "10.15"
+            mac_target: "11.0"
           - python: "cp311-*"
             label: "cp311"
-            mac_target: "10.15"
+            mac_target: "11.0"
           - python: "cp312-*"
             label: "cp312"
-            mac_target: "10.15"
+            mac_target: "11.0"
           - python: "cp313-*"
             label: "cp313"
-            mac_target: "10.15"
+            mac_target: "11.0"
     steps:
       - uses: actions/checkout@v4
         with:
