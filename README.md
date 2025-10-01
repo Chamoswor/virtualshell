@@ -23,7 +23,7 @@ pip install virtualshell
 
 ## Platform & Python Support
 
-Prebuilt wheels are provided via [PyPI](https://pypi.org/project/virtualshell/) for common platforms and Python versions.  
+Prebuilt wheels are provided via PyPI for common platforms and Python versions.  
 This means you can usually `pip install virtualshell` without needing a compiler.
 
 **Supported Python versions:**
