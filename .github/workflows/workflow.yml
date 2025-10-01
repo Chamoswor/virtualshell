@@ -169,10 +169,11 @@ jobs:
       - name: Build wheels with cibuildwheel (universal2)
         env:
           CIBW_BUILD: ${{ matrix.python }}
-          CIBW_ARCHS_MACOS: "x86_64 arm64"
+          CIBW_ARCHS_MACOS: "universal2"
           CIBW_TEST_COMMAND: python -c "import virtualshell; print('ok')"
           CIBW_BEFORE_BUILD_MACOS: "python -m pip install ninja"
-          CIBW_ENVIRONMENT_MACOS: 'PYBIND11_FINDPYTHON=ON CMAKE_GENERATOR=Ninja MACOSX_DEPLOYMENT_TARGET=10.15 CMAKE_OSX_DEPLOYMENT_TARGET=10.15'
+          CIBW_MACOSX_DEPLOYMENT_TARGET: "11.0"
+          CIBW_ENVIRONMENT_MACOS: 'PYBIND11_FINDPYTHON=ON CMAKE_GENERATOR=Ninja CMAKE_OSX_ARCHITECTURES="arm64;x86_64"'
         run: |
           python -m cibuildwheel --platform macos --output-dir wheelhouse .
 
