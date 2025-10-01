@@ -26,7 +26,7 @@ pip install virtualshell
 
 * **Windows 10/11 x64**
 * **Linux**: x86_64 and aarch64 (manylinux_2_28 / glibc ≥ 2.28)
-* **macOS**: 12+ (x86_64 and arm64; universal2)
+* **macOS**: 12+ (x86_64 and arm64)
 * **Python**: 3.8 – 3.13
 
 > Requires PowerShell on `PATH` (`pwsh` preferred, `powershell` also supported).
