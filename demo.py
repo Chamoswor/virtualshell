@@ -10,11 +10,10 @@ def example_concurrent_work():
     """
     print("=== Concurrent Work Example ===")
     
-    with Shell() as sh:
-        # Set up a PowerShell function that takes some time to execute
-        print("Setting up PowerShell function with 10 ms delay per increment...")
-        sh.run("function SlowInc { Start-Sleep -Milliseconds 10; $global:i += 1; $global:i }")
-        sh.run("$global:i = 0")
+    with Shell(timeout_seconds=30) as sh:
+
+        print("Setting up PowerShell function...")
+        sh.run("function SayHey { Start-Sleep -Milliseconds 10000; echo 'Hey from PowerShell!' }")
 
         # Results storage
         async_results = []
@@ -26,9 +25,8 @@ def example_concurrent_work():
             async_results.append(r.out.strip())
 
         # Start a long-running PowerShell command asynchronously
-        print("Starting async PowerShell execution (1000 increments)...")
-        to_run = "SlowInc;" * 1000
-        future = sh.run_async(to_run, callback=async_callback)
+        print("Starting async PowerShell execution")
+        future = sh.run_async("SayHey", callback=async_callback)
         
         print("Now doing other work while PowerShell runs in background..., max 50 iterations")
         
@@ -53,8 +51,8 @@ def example_concurrent_work():
         # Wait for async to complete if it hasn't already
         if not future.done():
             print("Waiting for PowerShell to finish...")
-            future.result()  # This will block until completion
-        
+            future.result()
+
         elapsed = time.time() - start_time
         
         print(f"\n=== Results ===")
