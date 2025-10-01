@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "virtualshell"
 description = "High-performance PowerShell bridge (C++ pybind11 backend)"
-version = "1.0.0"
+version = "1.0.1"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Kim-Andre Myrvold" }]

@@ -168,8 +168,8 @@ class ExecutionResult:
     def from_cpp(cls, r: _CPP_ExecResult) -> "ExecutionResult":
         # Attribute access is defensive to tolerate ABI field name differences.
         return cls(
-            out=getattr(r, "output", ""),
-            err=getattr(r, "error", ""),
+            out=getattr(r, "out", ""),
+            err=getattr(r, "err", ""),
             exit_code=int(getattr(r, "exit_code", getattr(r, "exitCode", -1))),
             success=bool(getattr(r, "success", False)),
             execution_time=float(getattr(r, "execution_time", getattr(r, "executionTime", 0.0))),
