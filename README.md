@@ -22,12 +22,22 @@ A single long-lived PowerShell process is managed in C++, handling pipes, thread
 pip install virtualshell
 ````
 
-### Supported platforms
+## Platform & Python Support
 
-* **Windows 10/11 x64**
-* **Linux**: x86_64 and aarch64 (manylinux_2_28 / glibc ≥ 2.28)
-* **macOS**: 12+ (x86_64 and arm64)
-* **Python**: 3.8 – 3.13
+Prebuilt wheels are provided via [PyPI](https://pypi.org/project/virtualshell/) for common platforms and Python versions.  
+This means you can usually `pip install virtualshell` without needing a compiler.
+
+**Supported Python versions:**
+- 3.8, 3.9, 3.10, 3.11, 3.12, 3.13
+
+**Supported platforms:**
+- **Windows** (x86_64, MSVC build)
+- **Linux** (x86_64, aarch64, manylinux2014/2.28)
+- **macOS** (universal2: x86_64 + arm64)
+
+If your platform is not listed above, pip will fall back to building from source.  
+See [Building from source](#building-from-source-advanced) for details.
+
 
 > Requires PowerShell on `PATH` (`pwsh` preferred, `powershell` also supported).
 
