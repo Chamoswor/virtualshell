@@ -51,7 +51,7 @@ def example_concurrent_work():
         # Wait for async to complete if it hasn't already
         if not future.done():
             print("Waiting for PowerShell to finish...")
-            future.result()
+            future.result() # This will block until poweshell finnishes the Job 
 
         elapsed = time.time() - start_time
         
