@@ -135,7 +135,7 @@ Pass `as_dataclass=False` to receive the raw C++ result object.
 
 ### Timeouts
 
-* Every method accepts a `timeout` (or `per_command_timeout`) <- (soon) in seconds.
+* Every method accepts a `timeout` (or `per_command_timeout`) in seconds.
 * On timeout: `success=False`, `exit_code=-1`, `err` contains `"timeout"`.
 * Async futures resolve with the timeout result; late output is dropped in C++.
 
