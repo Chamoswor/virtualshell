@@ -94,7 +94,7 @@ public:
      * @brief Configuration for the PowerShell process.
      */
     struct Config {
-        std::string powershellPath = "pwsh.exe";  ///< Path to the PowerShell executable
+        std::string powershellPath = "pwsh";      ///< Path to the PowerShell executable
         std::string workingDirectory = "";        ///< Working directory (empty = current directory)
         bool captureOutput = true;                ///< Capture stdout
         bool captureError  = true;                ///< Capture stderr

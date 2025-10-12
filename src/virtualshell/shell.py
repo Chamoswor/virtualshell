@@ -116,7 +116,7 @@ def _raise_on_failure(
     """
     if res.success:
         return
-    err = (res.error or "")
+    err = (res.err or "")
     if res.exit_code == -1 and "timeout" in err.lower():
         raise ExecutionTimeoutError(f"{label} timed out after {timeout_used}s")
     if raise_on_error:
