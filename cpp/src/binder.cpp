@@ -522,7 +522,7 @@ PYBIND11_MODULE(_core, m) {
     }, "Create a new VirtualShell instance", py::arg("config"));
 
     // Metadata
-    m.attr("__version__") = "1.0.1";
+    m.attr("__version__") = "1.0.2";
     m.attr("__author__")  = "Kim-Andre Myrvold";
 }
 
