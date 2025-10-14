@@ -1589,14 +1589,6 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
     S->timeoutSec = (timeoutSeconds > 0 ? timeoutSeconds : config.timeoutSeconds);
     S->id = id;
 
-    // Old version with RS chars:
-    /*
-    // Pre-build end marker to match what build_pwsh_packet() will emit.
-    S->endMarker.reserve(16);
-    S->endMarker.push_back('\x1E'); S->endMarker += "SS_END_";
-    S->endMarker += std::to_string(id); S->endMarker.push_back('\x1E');
-    */
-    // New version without RS chars:
     S->endMarker = "<<<SS_END_" + std::to_string(id) + ">>>";
     S->timeoutSec = (timeoutSeconds > 0 ? timeoutSeconds : config.timeoutSeconds);
     S->cb = std::move(cb);
