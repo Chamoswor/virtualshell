@@ -21,12 +21,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-
-if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  message(FATAL_ERROR "MinGW is not supported on Windows for this project. Use MSVC.")
-endif()
-
-
 set(SRC
   cpp/src/binder.cpp
   cpp/src/virtual_shell.cpp

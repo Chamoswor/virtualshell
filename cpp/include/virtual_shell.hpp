@@ -64,7 +64,7 @@
  * without showing a window.
  */
 class VirtualShell : public std::enable_shared_from_this<VirtualShell> {
-    static std::string build_pwsh_packet(uint64_t id, std::string_view command);
+    static std::string build_pwsh_packet(uint64_t id, std::string_view cmd);
 public:
     struct OutChunk { bool isErr; std::string data; };
 
