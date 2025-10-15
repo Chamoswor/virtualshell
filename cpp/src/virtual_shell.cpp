@@ -49,26 +49,7 @@ static bool send_ctrl_break(DWORD pid) {
     return GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != 0;
 }
 
-static const std::string pwshTimeoutWrapper = R"PS(
-Set-Item -Path function:Invoke-WithTimeout -Value ([ScriptBlock]::Create(@'
-param(
-    [scriptblock]$Script,
-    [int]$TimeoutSec = 5
-)
-if ($TimeoutSec -le 0) { & $Script; return }
-$job = Start-ThreadJob -ScriptBlock $Script
-try {
-    if (Wait-Job -Id $job.Id -Timeout $TimeoutSec) {
-        Receive-Job -Id $job.Id -ErrorAction Stop
-    } else {
-        Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-        Write-Error 'timeout'
-    }
-} finally {
-    Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-}
-'@))
-)PS";
+
 
 
 /**
@@ -172,6 +153,62 @@ static std::string read_overlapped_once(OverlappedPipe& P, bool blocking) {
 }
 
 #endif
+
+static const std::string pwshTimeoutWrapper = R"PS(
+$__vs_useThreadJob = $false
+try {
+    if (-not (Get-Module -Name ThreadJob -ErrorAction SilentlyContinue)) {
+        Import-Module -Name ThreadJob -ErrorAction SilentlyContinue | Out-Null
+    }
+    if (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) {
+        $__vs_useThreadJob = $true
+    }
+} catch {
+    $__vs_useThreadJob = $false
+}
+
+if ($__vs_useThreadJob) {
+    $__vs_invokeWithTimeoutBody = @'
+param(
+    [scriptblock]$Script,
+    [int]$TimeoutSec = 5
+)
+if ($TimeoutSec -le 0) { & $Script; return }
+$job = Start-ThreadJob -ScriptBlock $Script
+try {
+    if (Wait-Job -Id $job.Id -Timeout $TimeoutSec) {
+        Receive-Job -Id $job.Id -ErrorAction Stop
+    } else {
+        Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
+        Write-Error 'timeout'
+    }
+} finally {
+    Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
+}
+'@
+} else {
+    $__vs_invokeWithTimeoutBody = @'
+param(
+    [scriptblock]$Script,
+    [int]$TimeoutSec = 5
+)
+if ($TimeoutSec -le 0) { & $Script; return }
+$job = Start-Job -ScriptBlock $Script
+try {
+    if (Wait-Job -Id $job.Id -Timeout $TimeoutSec) {
+        Receive-Job -Id $job.Id -ErrorAction Stop
+    } else {
+        Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
+        Write-Error 'timeout'
+    }
+} finally {
+    Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
+}
+'@
+}
+
+Set-Item -Path function:Invoke-WithTimeout -Value ([ScriptBlock]::Create($__vs_invokeWithTimeoutBody))
+)PS";
 
 static inline void trim_inplace(std::string& s) {
     // Remove leading/trailing whitespace (space, tab, CR, LF) in-place.
