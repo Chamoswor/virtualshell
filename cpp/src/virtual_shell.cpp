@@ -154,6 +154,8 @@ static std::string read_overlapped_once(OverlappedPipe& P, bool blocking) {
 
 #endif
 
+static constexpr std::string_view INTERNAL_TIMEOUT_SENTINEL = "__VS_INTERNAL_TIMEOUT__";
+
 static const std::string pwshTimeoutWrapper = R"PS(
 $__vs_useThreadJob = $false
 try {
@@ -180,7 +182,7 @@ try {
         Receive-Job -Id $job.Id -ErrorAction Stop
     } else {
         Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-        Write-Error 'timeout'
+        throw [System.TimeoutException]::new("Command timed out after $TimeoutSec seconds")
     }
 } finally {
     Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
@@ -199,7 +201,7 @@ try {
         Receive-Job -Id $job.Id -ErrorAction Stop
     } else {
         Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-        Write-Error 'timeout'
+        throw [System.TimeoutException]::new("Command timed out after $TimeoutSec seconds")
     }
 } finally {
     Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
@@ -1657,7 +1659,18 @@ std::string VirtualShell::wrap_with_internal_timeout(std::string_view cmd, doubl
     if (s.empty() || s.back() != '\n') s.push_back('\n');
     s += "'@)\n";
     s += "try { Invoke-WithTimeout -Script $__vs_cmd -TimeoutSec " + std::to_string((int)timeoutSec) + " }\n";
-    s += "catch { [Console]::Error.WriteLine($_.Exception.Message) }\n";
+    s += "catch {\n";
+    s += "    if ($_.Exception -is [System.TimeoutException]) {\n";
+    s += "        [Console]::Error.WriteLine('" + std::string(INTERNAL_TIMEOUT_SENTINEL) + "')\n";
+    s += "        if ($_.Exception.Message) {\n";
+    s += "            [Console]::Error.WriteLine($_.Exception.Message)\n";
+    s += "        } else {\n";
+    s += "            [Console]::Error.WriteLine('timeout')\n";
+    s += "        }\n";
+    s += "    } else {\n";
+    s += "        [Console]::Error.WriteLine($_.Exception.Message)\n";
+    s += "    }\n";
+    s += "}\n";
     return s;
 }
 
@@ -1760,7 +1773,20 @@ void VirtualShell::onChunk_(bool isErr, std::string_view sv) {
             auto it = inflight_.find(id);
             if (it != inflight_.end()) {
                 // NOTE: sv is transient; append copies the bytes (safe after we return).
-                it->second->errBuf.append(sv.data(), sv.size());
+                CmdState& st = *it->second;
+                st.errBuf.append(sv.data(), sv.size());
+
+                // Detect internal timeout sentinel emitted by the PowerShell wrapper.
+                auto& buf = st.errBuf;
+                static const std::string sentinel{INTERNAL_TIMEOUT_SENTINEL};
+                size_t pos = std::string::npos;
+                while ((pos = buf.find(sentinel)) != std::string::npos) {
+                    size_t eraseEnd = pos + sentinel.size();
+                    if (eraseEnd < buf.size() && buf[eraseEnd] == '\r') { ++eraseEnd; }
+                    if (eraseEnd < buf.size() && buf[eraseEnd] == '\n') { ++eraseEnd; }
+                    buf.erase(pos, eraseEnd - pos);
+                    st.timedOut.store(true);
+                }
             }
         }
         return;
