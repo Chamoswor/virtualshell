@@ -145,7 +145,8 @@ private:
 
     Config config;                        ///< Current process configuration
     std::atomic<bool> isRunning_{false};  ///< True if PowerShell process is alive
-    std::atomic<bool> shouldStop{false};  ///< Flag to request process termination
+    std::atomic<bool> shouldStop{false};  ///< Flag to serialize and request process termination
+    std::mutex stopMx_;                   ///< Serializes stop() invocations
     
     std::thread writerTh_;                ///< Writer thread (stdin feeder)
     std::thread rOutTh_;                  ///< Reader thread for stdout
@@ -223,6 +224,7 @@ private:
     void timeoutScan_();
 
     void fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSentinel);
+    void requestStopAsync_(bool force);
 
     std::thread timerThread_;       ///< Background watchdog thread for timeouts
     std::atomic<bool> timerRun_{false}; ///< True while timeout watchdog is active

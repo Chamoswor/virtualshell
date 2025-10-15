@@ -93,7 +93,7 @@ private:
     Logger() {
         // Auto-enable via env var:
         // VIRTUALSHELL_DEBUG=1
-        // VIRTUALSHELL_DEBUG_PATH=C:\temp\vshell.log (optional)
+        // VIRTUALSHELL_DEBUG_PATH=C:\temp\vshell.log
         const char* env_on   = std::getenv("VIRTUALSHELL_DEBUG");
         const char* env_path = std::getenv("VIRTUALSHELL_DEBUG_PATH");
         if (env_path && *env_path) path_ = env_path;

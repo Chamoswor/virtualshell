@@ -21,10 +21,38 @@ using namespace _VirtualShellHelpers;
 
 namespace fs = std::filesystem;
 
+#ifdef _WIN32
+namespace {
+BOOL cancel_io_ex_optional(HANDLE h) {
+    if (!h || h == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+    using Fn = BOOL (WINAPI *)(HANDLE, LPOVERLAPPED);
+    static Fn fn = reinterpret_cast<Fn>(
+        ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"), "CancelIoEx"));
+    if (!fn) {
+        return FALSE;
+    }
+    return fn(h, nullptr);
+}
+
+void cancel_thread_io_optional(HANDLE threadHandle) {
+    if (!threadHandle) {
+        return;
+    }
+    using Fn = BOOL (WINAPI *)(HANDLE);
+    static Fn fn = reinterpret_cast<Fn>(
+        ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"), "CancelSynchronousIo"));
+    if (!fn) {
+        return;
+    }
+    fn(threadHandle);
+}
+}
+#endif
+
 constexpr auto DOT_SOURCE_PREFIX = ". ";
 constexpr auto NO_SOURCE_PREFIX  = "& ";
-
-
 
 
 VirtualShell::VirtualShell(const Config& config) : config(config) {
@@ -175,6 +203,8 @@ VirtualShell& VirtualShell::operator=(VirtualShell&& other) noexcept {
 bool VirtualShell::start() {
     if (isRunning_) return false; // Already running; do not re-spawn a second process instance.
 
+    shouldStop.store(false, std::memory_order_release);
+
     if (!createPipes()) {
         return false; // Pipe setup failed; cannot attach stdio to child.
     }
@@ -303,7 +333,7 @@ bool VirtualShell::start() {
     (void)sendInitialCommands(); // Optional user/preset initialization; ignore failures.
     if (config.enforceInternalTimeouts) {
         auto fut_init = this->submit(pwshTimeoutWrapper, /*timeoutSeconds=*/30.0, /*retPartial*/0, /*cb*/{});
-        auto res_init = fut_init.get();              // VENT til BEG/END er sett
+        auto res_init = fut_init.get();
         if (!res_init.success) {
             VSHELL_DBG("INIT", "Invoke-WithTimeout install failed: err='%s'", res_init.err.c_str());
             this->stop(true);
@@ -319,8 +349,14 @@ bool VirtualShell::start() {
 }
 
 void VirtualShell::stop(bool force) {
+    std::unique_lock<std::mutex> stopLock(stopMx_);
     // Fast exit if process not running
-    if (!isRunning_) return; // Idempotent: safe if stop() is called multiple times.
+    if (!isRunning_) {
+        shouldStop.store(false, std::memory_order_release);
+        return; // Idempotent: safe if stop() is called multiple times.
+    }
+
+    shouldStop.store(true, std::memory_order_release);
 
     VSHELL_DBG("LIFECYCLE", "stop(force=%d)", int(force));
 
@@ -329,11 +365,26 @@ void VirtualShell::stop(bool force) {
     writeCv_.notify_all();       // Wake writerLoop_() if it's waiting on empty queue.
     chunkCv_.notify_all();       // Wake any chunk parser; harmless if not currently waiting.
 
+#ifdef _WIN32
+    auto cancelThreadIo = [](std::thread& th) {
+        if (!th.joinable()) return;
+        HANDLE native = th.native_handle();
+        cancel_thread_io_optional(native);
+    };
+
+    cancelThreadIo(rOutTh_);
+    cancelThreadIo(rErrTh_);
+    cancelThreadIo(writerTh_);
+#endif
+
     // 2) Try graceful termination of PowerShell
     (void)sendInput("exit\n");   // Best-effort: if stdin is still open, ask the shell to exit cleanly.
 
     // 3) Close pipe ends to break blocking reads/writes in reader loops
 #ifdef _WIN32
+    cancel_io_ex_optional(hOutputRead);
+    cancel_io_ex_optional(hErrorRead);
+    cancel_io_ex_optional(hInputWrite);
     if (hInputWrite) { CloseHandle(hInputWrite); hInputWrite = NULL; }  // stdin (write end)
     if (hOutputRead) { CloseHandle(hOutputRead); hOutputRead = NULL; }  // stdout (read end)
     if (hErrorRead)  { CloseHandle(hErrorRead);  hErrorRead  = NULL; }  // stderr (read end)
@@ -381,7 +432,7 @@ void VirtualShell::stop(bool force) {
     }
 
     // 7) Wait for process to exit; force if requested
-    bool exited = waitForProcess(5000); // Best-effort graceful wait (ms).
+    bool exited = waitForProcess(force ? 0 : 5000); // Best-effort graceful wait (ms).
     if (!exited && force) {
 #ifdef _WIN32
         if (hProcess) {
@@ -410,7 +461,7 @@ void VirtualShell::stop(bool force) {
     processId = -1; // Mark as no longer valid. FDs already closed above.
 #endif
 
-
+    shouldStop.store(false, std::memory_order_release);
 }
 
 bool VirtualShell::isAlive() const {
@@ -1462,11 +1513,20 @@ std::future<VirtualShell::ExecutionResult>
 VirtualShell::submit(std::string command, double timeoutSeconds, int retPartialOnTimeout,
                      std::function<void(const ExecutionResult&)> cb)
 {
+    if (shouldStop.load(std::memory_order_acquire)) {
+        std::promise<ExecutionResult> p; ExecutionResult r{};
+        r.err = "PowerShell process is stopping";
+        r.exitCode = -2;
+        r.success = false;
+        p.set_value(std::move(r));
+        return p.get_future();
+    }
+
     if (!isRunning_) {
         // Process not running: fulfill a ready future with an error result.
         std::promise<ExecutionResult> p; ExecutionResult r{};
         r.err   = "PowerShell process is not running";
-        r.exitCode= -1;
+        r.exitCode= -3;
         r.success = false;
         p.set_value(std::move(r));
         return p.get_future();
@@ -1763,6 +1823,34 @@ void VirtualShell::fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSent
 
     try { st->prom.set_value(r); } catch (...) {}
     if (st->cb) { try { st->cb(r); } catch (...) {} }
+
+    if (!config.enforceInternalTimeouts) {
+        VSHELL_DBG("TIMEOUT", "id=%llu scheduling forced stop", static_cast<unsigned long long>(st->id));
+        requestStopAsync_(true);
+    }
+}
+
+void VirtualShell::requestStopAsync_(bool force) {
+    auto weak = weak_from_this();
+    if (weak.expired()) {
+        return;
+    }
+
+    bool expected = false;
+    if (!shouldStop.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    try {
+        std::thread([weak = std::move(weak), force]() mutable {
+            if (auto self = weak.lock()) {
+                self->stop(force);
+            }
+        }).detach();
+    } catch (...) {
+        shouldStop.store(false, std::memory_order_release);
+        VSHELL_DBG("TIMEOUT", "failed to spawn stop thread");
+    }
 }
 
 void VirtualShell::timeoutOne_(uint64_t id) {

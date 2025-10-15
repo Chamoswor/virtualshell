@@ -9,3 +9,4 @@ test/
 dist/
 .venv*
 test_run*
+test_sync_timeout.py
