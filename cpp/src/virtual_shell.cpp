@@ -3,6 +3,7 @@
 #include <windows.h>
 #endif
 #include "../include/virtual_shell.hpp"
+#include "../include/helpers.h"
 #include <chrono>
 #include <algorithm>
 #include <fstream>
@@ -16,228 +17,14 @@
 
 #include "virtual_shell_debug.hpp"
 using namespace VirtualShellDebug;
+using namespace _VirtualShellHelpers;
 
 namespace fs = std::filesystem;
 
 constexpr auto DOT_SOURCE_PREFIX = ". ";
 constexpr auto NO_SOURCE_PREFIX  = "& ";
 
-// ==============================
-// Windows helpers / shims
-// ==============================
-#ifdef _WIN32
 
-/**
- * Convert UTF-16 (Windows wide string) to UTF-8.
- * Note: allocates once using the exact required byte count.
- * Failure returns empty string.
- */
-static std::string wstring_to_utf8(const std::wstring& w) {
-    if (w.empty()) return {};
-    int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    if (n <= 0) return {};
-    std::string out(n, '\0');
-    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), out.data(), n, nullptr, nullptr);
-    return out;
-}
-
-/**
- * Best-effort CTRL+BREAK delivery to a process group.
- * Caller is responsible for having created a new console process group.
- */
-static bool send_ctrl_break(DWORD pid) {
-    return GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != 0;
-}
-
-
-
-
-/**
- * Complete an overlapped I/O and report bytes read/written.
- * @internal
- * @param h        I/O handle
- * @param ov       OVERLAPPED used for the operation
- * @param bytes    OUT: number of bytes transferred (0 on error)
- * @param blocking If true, wait until completion; if false, return immediately if incomplete
- * 
- * @return true  => either completed successfully or encountered a terminal error
- *         false => still in progress (ERROR_IO_INCOMPLETE)
- *
- * Rationale: We treat any status other than INCOMPLETE as "done", and let callers
- *            decide how to handle errors (bytes=0). This keeps read loops simpler.
- */
-static bool complete_overlapped(HANDLE h, OVERLAPPED& ov, DWORD& bytes, bool blocking) {
-    if (::GetOverlappedResult(h, &ov, &bytes, blocking ? TRUE : FALSE)) {
-        return true;
-    }
-    DWORD err = ::GetLastError();
-    if (err == ERROR_IO_INCOMPLETE) {
-        return false; // still pending
-    }
-    bytes = 0;        // error path: normalize to zero bytes
-    return true;      // signal "done" so caller can handle/exit
-}
-
-static std::string read_overlapped_once(OverlappedPipe& P, bool blocking) {
-    std::string out;
-
-    // Guard: invalid handle => no data
-    if (P.h == nullptr || P.h == INVALID_HANDLE_VALUE) return out;
-
-    // 1) If a previous ReadFile was pending, try to complete it first.
-    //    - non-blocking: if still INCOMPLETE, just return whatever we have (empty).
-    //    - blocking: complete_overlapped(..., blocking=true) will wait.
-    if (P.pending) {
-        DWORD br = 0;
-        if (!complete_overlapped(P.h, P.ov, br, blocking)) {
-            // Still pending and caller requested non-blocking => bail
-            return out;
-        }
-        P.pending = false;
-        ::ResetEvent(P.ov.hEvent);
-
-        if (br > 0) {
-            out.append(P.buf.data(), P.buf.data() + br);
-        }
-    }
-
-    // 2) Issue fresh reads until:
-    //    - we hit EOF / broken pipe,
-    //    - we transition to a pending async read (and caller is non-blocking),
-    //    - or we complete a read (possibly multiple times) and need to loop again.
-    for (;;) {
-        ::ResetEvent(P.ov.hEvent);
-        DWORD br = 0;
-
-        // Overlapped read:
-        // - ok==TRUE => immediate completion; 'br' bytes available (0==EOF)
-        // - ok==FALSE && ERROR_IO_PENDING => async in-flight
-        // - ok==FALSE && other error => treat as terminal
-        BOOL ok = ::ReadFile(P.h, P.buf.data(), static_cast<DWORD>(P.buf.size()), &br, &P.ov);
-        if (ok) {
-            if (br == 0) break; // EOF
-            out.append(P.buf.data(), P.buf.data() + br);
-            continue;           // try to read more in this pass
-        }
-
-        DWORD err = ::GetLastError();
-        if (err == ERROR_IO_PENDING) {
-            P.pending = true;
-
-            if (!blocking) {
-                // Non-blocking mode: leave the async op in-flight; return what we have.
-                break;
-            }
-
-            // Blocking mode: wait for completion of this overlapped read.
-            DWORD done = 0;
-            if (complete_overlapped(P.h, P.ov, done, /*blocking*/true)) {
-                P.pending = false;
-                ::ResetEvent(P.ov.hEvent);
-                if (done > 0) out.append(P.buf.data(), P.buf.data() + done);
-                continue; // try another read immediately
-            } else {
-                // Still incomplete (shouldn't happen with blocking=true) — exit loop.
-                break;
-            }
-        } else if (err == ERROR_BROKEN_PIPE || err == ERROR_HANDLE_EOF) {
-            // Producer closed the pipe: normal termination.
-            break;
-        } else {
-            // Any other error: treat as terminal; caller will decide next steps.
-            break;
-        }
-    }
-
-    return out;
-}
-
-#endif
-
-static constexpr std::string_view INTERNAL_TIMEOUT_SENTINEL = "__VS_INTERNAL_TIMEOUT__";
-
-static const std::string pwshTimeoutWrapper = R"PS(
-$__vs_useThreadJob = $false
-try {
-    if (-not (Get-Module -Name ThreadJob -ErrorAction SilentlyContinue)) {
-        Import-Module -Name ThreadJob -ErrorAction SilentlyContinue | Out-Null
-    }
-    if (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) {
-        $__vs_useThreadJob = $true
-    }
-} catch {
-    $__vs_useThreadJob = $false
-}
-
-if ($__vs_useThreadJob) {
-    $__vs_invokeWithTimeoutBody = @'
-param(
-    [scriptblock]$Script,
-    [int]$TimeoutSec = 5
-)
-if ($TimeoutSec -le 0) { & $Script; return }
-$job = Start-ThreadJob -ScriptBlock $Script
-try {
-    if (Wait-Job -Id $job.Id -Timeout $TimeoutSec) {
-        Receive-Job -Id $job.Id -ErrorAction Stop
-    } else {
-        Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-        throw [System.TimeoutException]::new("Command timed out after $TimeoutSec seconds")
-    }
-} finally {
-    Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-}
-'@
-} else {
-    $__vs_invokeWithTimeoutBody = @'
-param(
-    [scriptblock]$Script,
-    [int]$TimeoutSec = 5
-)
-if ($TimeoutSec -le 0) { & $Script; return }
-$job = Start-Job -ScriptBlock $Script
-try {
-    if (Wait-Job -Id $job.Id -Timeout $TimeoutSec) {
-        Receive-Job -Id $job.Id -ErrorAction Stop
-    } else {
-        Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-        throw [System.TimeoutException]::new("Command timed out after $TimeoutSec seconds")
-    }
-} finally {
-    Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-}
-'@
-}
-
-Set-Item -Path function:Invoke-WithTimeout -Value ([ScriptBlock]::Create($__vs_invokeWithTimeoutBody))
-)PS";
-
-static inline void trim_inplace(std::string& s) {
-    // Remove leading/trailing whitespace (space, tab, CR, LF) in-place.
-    auto is_space = [](unsigned char ch){ return ch==' '||ch=='\t'||ch=='\r'||ch=='\n'; };
-    size_t a = 0, b = s.size();
-    while (a < b && is_space(static_cast<unsigned char>(s[a]))) ++a;
-    while (b > a && is_space(static_cast<unsigned char>(s[b-1]))) --b;
-
-    // Only reassign if trimming actually changes the view.
-    if (a==0 && b==s.size()) return;
-    s.assign(s.begin()+a, s.begin()+b);
-}
-
-static inline std::string ps_quote(const std::string& s) {
-    // Quote a string for PowerShell literal context.
-    // - Encloses with single quotes.
-    // - Internal single quotes are doubled (' -> '').
-    std::string t;
-    t.reserve(s.size() + 2);
-    t.push_back('\'');
-    for (char c : s) {
-        if (c == '\'') t += "''"; 
-        else t.push_back(c);
-    }
-    t.push_back('\'');
-    return t;
-}
 
 
 VirtualShell::VirtualShell(const Config& config) : config(config) {
@@ -522,7 +309,7 @@ bool VirtualShell::start() {
             this->stop(true);
             throw std::runtime_error("Failed to install Invoke-WithTimeout");
         }
-        // Valgfritt: verifiser kjapt (ikke kaste hvis 'NO'; bare logg)
+
         auto chk = this->submit("if (Test-Path function:Invoke-WithTimeout){'OK'}else{'NO'}", 5.0, 0, {}).get();
         VSHELL_DBG("INIT", "Invoke-WithTimeout present: %s", (chk.out.find("OK")!=std::string::npos ? "yes" : "no"));
         isTimeoutWrapperCreated_ = true;
@@ -1157,7 +944,6 @@ std::string VirtualShell::readOutput(bool blocking) {
 #endif
 }
 
-
 std::string VirtualShell::readError(bool blocking) {
     std::string out;
     constexpr size_t BUF_SZ = 64 * 1024;
@@ -1301,7 +1087,6 @@ bool VirtualShell::updateConfig(const Config& newConfig) {
     if (isRunning_) {
         return false; // Cannot change config while process is running
     }
-    
     config = newConfig;
     return true;
 }
@@ -1351,7 +1136,6 @@ void VirtualShell::writerLoop_() {
         ioRunning_ = false;
     }
 }
-
 
 bool VirtualShell::sendInitialCommands() {
     if (!config.initialCommands.empty()) {
@@ -1430,7 +1214,6 @@ bool VirtualShell::createPipes() {
 #endif
 
 }
-
 
 void VirtualShell::closePipes() {
 #ifdef _WIN32
@@ -1722,6 +1505,8 @@ VirtualShell::submit(std::string command, double timeoutSeconds, int retPartialO
     VSHELL_DBG("SUBMIT", "id=%llu cmd='%s' timeout=%.3f returnPartial=%d",
            (unsigned long long)id, command.c_str(), S->timeoutSec, int(retTimeout));
 
+    const double effectiveTimeout = S->timeoutSec;
+
     auto fut = S->prom.get_future();
     {
         // Register in-flight command before enqueueing write, so readers can demux immediately.
@@ -1738,8 +1523,10 @@ VirtualShell::submit(std::string command, double timeoutSeconds, int retPartialO
     }
 
     std::string cmd = std::move(command);
-    if (config.enforceInternalTimeouts && isTimeoutWrapperCreated_ && S->timeoutSec > 0.0) {
-        cmd = wrap_with_internal_timeout(cmd, S->timeoutSec);
+    if (config.enforceInternalTimeouts && isTimeoutWrapperCreated_ && effectiveTimeout > 0.0) {
+        VSHELL_DBG("SUBMIT", " id=%llu wrapped with internal timeout %.3f sec",
+            (unsigned long long)id, effectiveTimeout);
+        cmd = wrap_with_internal_timeout(cmd, effectiveTimeout);
     }
 
     {
@@ -1765,30 +1552,68 @@ void VirtualShell::onChunk_(bool isErr, std::string_view sv) {
         // Rationale: PowerShell doesn't tag stderr to a specific command; we associate it
         // with the currently-active one to preserve ordering. This is a heuristic and can
         // misattribute interleaved errors when multiple commands are in flight.
-        // leaves this as a best-effort approach for now
+        static constexpr std::string_view sentinel{INTERNAL_TIMEOUT_SENTINEL};
 
-        // TODO: Improve in the future by tracking command start times and associating stderr chunks based on timestamps if the need arises.
+        std::string chunk(sv.data(), sv.size());
+
+        CmdState* st = nullptr;
+        uint64_t stId = 0;
         if (!inflightOrder_.empty()) {
-            uint64_t id = inflightOrder_.front();
-            auto it = inflight_.find(id);
+            stId = inflightOrder_.front();
+            auto it = inflight_.find(stId);
             if (it != inflight_.end()) {
-                // NOTE: sv is transient; append copies the bytes (safe after we return).
-                CmdState& st = *it->second;
-                st.errBuf.append(sv.data(), sv.size());
-
-                // Detect internal timeout sentinel emitted by the PowerShell wrapper.
-                auto& buf = st.errBuf;
-                static const std::string sentinel{INTERNAL_TIMEOUT_SENTINEL};
-                size_t pos = std::string::npos;
-                while ((pos = buf.find(sentinel)) != std::string::npos) {
-                    size_t eraseEnd = pos + sentinel.size();
-                    if (eraseEnd < buf.size() && buf[eraseEnd] == '\r') { ++eraseEnd; }
-                    if (eraseEnd < buf.size() && buf[eraseEnd] == '\n') { ++eraseEnd; }
-                    buf.erase(pos, eraseEnd - pos);
-                    st.timedOut.store(true);
-                }
+                st = it->second.get();
             }
         }
+
+        bool completeFromSentinel = false;
+        while (!chunk.empty()) {
+            size_t pos = chunk.find(sentinel);
+            if (pos == std::string::npos) break;
+
+            size_t eraseEnd = pos + sentinel.size();
+            if (eraseEnd < chunk.size() && chunk[eraseEnd] == '\r') { ++eraseEnd; }
+            if (eraseEnd < chunk.size() && chunk[eraseEnd] == '\n') { ++eraseEnd; }
+
+            uint32_t expected = pendingTimeoutSentinels_.load(std::memory_order_relaxed);
+            chunk.erase(pos, eraseEnd - pos);
+
+            if (expected > 0) {
+                pendingTimeoutSentinels_.fetch_sub(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            if (st) {
+                st->timedOut.store(true);
+                completeFromSentinel = true;
+            }
+
+            break; // Only handle the first relevant sentinel per chunk
+        }
+
+        if (st && !chunk.empty()) {
+            st->errBuf.append(chunk.data(), chunk.size());
+        }
+
+        if (completeFromSentinel && st) {
+            std::unique_ptr<CmdState> done;
+            auto it = inflight_.find(stId);
+            if (it != inflight_.end()) {
+                done = std::move(it->second);
+                inflight_.erase(it);
+            }
+            if (!inflightOrder_.empty() && inflightOrder_.front() == stId) {
+                inflightOrder_.pop_front();
+            } else {
+                auto qit = std::find(inflightOrder_.begin(), inflightOrder_.end(), stId);
+                if (qit != inflightOrder_.end()) inflightOrder_.erase(qit);
+            }
+
+            lk.unlock();
+            fulfillTimeout_(std::move(done), false);
+            lk.lock();
+        }
+
         return;
     }
 
@@ -1911,6 +1736,35 @@ void VirtualShell::completeCmdLocked_(CmdState& S, bool success) {
     }
 }
 
+void VirtualShell::fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSentinel) {
+    if (!st) return;
+
+    VSHELL_DBG("TIMEOUT", "id=%llu retPartial=%d out_so_far=%zu internal=%d",
+               static_cast<unsigned long long>(st->id),
+               int(st->retPartialOnTimeout.load()),
+               st->outBuf.size(),
+               expectSentinel ? 0 : 1);
+
+    if (expectSentinel) {
+        pendingTimeoutSentinels_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    inflightCount_.fetch_sub(1, std::memory_order_relaxed);
+
+    ExecutionResult r{};
+    r.success  = false;
+    r.exitCode = -1;
+    r.err = st->errBuf.empty() ? std::string("timeout") : std::move(st->errBuf);
+    if (st->retPartialOnTimeout) {
+        r.out = std::move(st->outBuf);
+    }
+
+    st->done.store(true);
+
+    try { st->prom.set_value(r); } catch (...) {}
+    if (st->cb) { try { st->cb(r); } catch (...) {} }
+}
+
 void VirtualShell::timeoutOne_(uint64_t id) {
     std::unique_ptr<CmdState> st;
 
@@ -1922,7 +1776,6 @@ void VirtualShell::timeoutOne_(uint64_t id) {
         st->timedOut.store(true);
         inflight_.erase(it);
 
-        // Remove also from ordering queue.
         if (!inflightOrder_.empty() && inflightOrder_.front() == id) {
             inflightOrder_.pop_front();
         } else {
@@ -1931,23 +1784,7 @@ void VirtualShell::timeoutOne_(uint64_t id) {
         }
     }
 
-    if (!st) return;
-
-    VSHELL_DBG("TIMEOUT", "id=%llu retPartial=%d out_so_far=%zu",
-           (unsigned long long)id, int(st->retPartialOnTimeout), st->outBuf.size());
-
-    inflightCount_.fetch_sub(1, std::memory_order_relaxed);
-
-    ExecutionResult r{};
-    r.success  = false;
-    r.exitCode = -1;
-    r.err    = "timeout";
-    if (st->retPartialOnTimeout) {
-        r.out = std::move(st->outBuf);
-    }
-
-    try { st->prom.set_value(r); } catch (...) {}
-    if (st->cb) { try { st->cb(r); } catch (...) {} }
+    fulfillTimeout_(std::move(st), true);
 }
 
 

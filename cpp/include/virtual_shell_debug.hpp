@@ -1,5 +1,16 @@
 // --- Debug logger (temporary) ----------------------------------------------
 #pragma once
+
+#if defined(_WIN32) && defined(_MSC_VER)
+  #pragma warning(push)
+  #pragma warning(disable : 4996) // getenv deprecation
+#endif
+
+#if defined(_WIN32) && defined(__clang__)
+  #pragma clang diagnostic push
+  #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -7,6 +18,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+
+
 
 namespace VirtualShellDebug {
 
@@ -126,3 +139,10 @@ private:
         VirtualShellDebug::Logger::instance().logf(TAG, FMT, ##__VA_ARGS__); } while(0)
 
 } // namespace VirtualShellDebug
+
+#if defined(_WIN32) && defined(__clang__)
+  #pragma clang diagnostic pop
+#endif
+#if defined(_WIN32) && defined(_MSC_VER)
+  #pragma warning(pop)
+#endif

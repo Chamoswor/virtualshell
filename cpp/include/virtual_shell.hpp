@@ -42,11 +42,6 @@
         }
     };
     
-    static std::string wstring_to_utf8(const std::wstring& w);
-    static bool send_ctrl_break(DWORD pid);
-    static bool complete_overlapped(HANDLE h, OVERLAPPED& ov, DWORD& bytes, bool blocking);
-
-    static std::string read_overlapped_once(OverlappedPipe& P, bool blocking);
 #else
     #include <unistd.h>
     #include <sys/wait.h>
@@ -189,6 +184,7 @@ private:
     std::atomic<uint32_t> inflightCount_{0}; ///< Current number of in-flight commands
     std::atomic<uint32_t> highWater_{0};     ///< High-water mark of in-flight commands
     std::deque<uint64_t>  inflightOrder_;    ///< FIFO order of in-flight command IDs
+    std::atomic<uint32_t> pendingTimeoutSentinels_{0}; ///< Expected stderr timeout sentinels to discard
 
     /**
      * @internal
@@ -225,6 +221,8 @@ private:
      * and calls timeoutOne_ as needed.
      */
     void timeoutScan_();
+
+    void fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSentinel);
 
     std::thread timerThread_;       ///< Background watchdog thread for timeouts
     std::atomic<bool> timerRun_{false}; ///< True while timeout watchdog is active
