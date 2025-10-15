@@ -165,11 +165,11 @@ class ExecutionResult:
     execution_time: float
 
     @classmethod
-    def from_cpp(cls, r: _CPP_ExecResult) -> "ExecutionResult":
+    def from_cpp(cls, r: _CPP_ExecResult, strip_results: bool = False) -> "ExecutionResult":
         # Attribute access is defensive to tolerate ABI field name differences.
         return cls(
-            out=getattr(r, "out", ""),
-            err=getattr(r, "err", ""),
+            out=getattr(r, "out", "") if not strip_results else (getattr(r, "out", "").strip()),
+            err=getattr(r, "err", "") if not strip_results else (getattr(r, "err", "").strip()),
             exit_code=int(getattr(r, "exit_code", getattr(r, "exitCode", -1))),
             success=bool(getattr(r, "success", False)),
             execution_time=float(getattr(r, "execution_time", getattr(r, "executionTime", 0.0))),
@@ -193,8 +193,12 @@ class Shell:
         powershell_path: Optional[str] = None,
         working_directory: Optional[Union[str, Path]] = None,
         timeout_seconds: float = 5.0,
+        return_partial_output_on_timeout: bool = False,
+        enforce_internal_timeouts: bool = False,
         environment: Optional[Dict[str, str]] = None,
         initial_commands: Optional[List[str]] = None,
+        set_UTF8: bool = True,
+        strip_results: bool = False,
         cpp_module: Any = None,
     ) -> None:
         """Configure a new Shell instance.
@@ -207,10 +211,19 @@ class Shell:
             Working directory for the child process. Resolved to an absolute path.
         timeout_seconds : float
             Default per-command timeout used when a method's `timeout` is not provided.
+        return_partial_output_on_timeout : bool
+            If True, commands that time out return whatever output was captured before the timeout.
+        enforce_internal_timeouts : bool
+            If True, all commands are wrapped inside a PowerShell `Start-Job` with a timeout.
         environment : Optional[Dict[str, str]]
             Extra environment variables for the child process.
         initial_commands : Optional[List[str]]
             Commands that the backend will issue on process start (e.g., encoding setup).
+        set_UTF8 : bool
+            If True, prepends a command to set `$OutputEncoding` to UTF-8. This is often desirable
+            to avoid encoding issues with non-ASCII output. Disable if you need a different encoding.
+        strip_results : bool
+            If True, automatically strip leading/trailing whitespace from `out` and `err`
         cpp_module : Any
             For testing/DI: provide a custom module exposing the C++ API surface.
         """
@@ -221,6 +234,8 @@ class Shell:
         if working_directory:
             cfg.working_directory = str(Path(working_directory).resolve())
         cfg.timeout_seconds = int(timeout_seconds or 0)
+        cfg.return_partial_output_on_timeout = bool(return_partial_output_on_timeout)
+        cfg.enforce_internal_timeouts = bool(enforce_internal_timeouts)
 
         if environment:
             # Copy to detach from caller's dict and avoid accidental mutation.
@@ -228,9 +243,20 @@ class Shell:
         if initial_commands:
             # Force string-ification to prevent surprises from non-str types.
             cfg.initial_commands = list(map(str, initial_commands))
+        
+        if set_UTF8:
+            cfg.initial_commands.insert(0, "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()")
 
         self._cfg: _CPP_Config = cfg
         self._core: _CPP_VirtualShell = mod.VirtualShell(cfg)
+        self._strip_results: bool = bool(strip_results)
+    
+    def set_strip_results(self, v: bool) -> None:
+        """Set whether to strip leading/trailing whitespace from `out` and `err`.
+
+        Default is False. This only affects results returned via `as_dataclass=True`.
+        """
+        self._strip_results = bool(v)
 
     def start(self) -> "Shell":
         """Start (or confirm) the backend PowerShell process.
@@ -270,6 +296,7 @@ class Shell:
         command: str,
         timeout: Optional[float] = None,
         *,
+        return_partial_on_timeout: Optional[bool] = None,
         raise_on_error: bool = False,
         as_dataclass: bool = True,
     ) -> Union[ExecutionResult, _CPP_ExecResult]:
@@ -286,8 +313,9 @@ class Shell:
         as_dataclass : bool
             If True, return an `ExecutionResult`; otherwise return the raw C++ result.
         """
+        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
-        res: _CPP_ExecResult = self._core.execute(command=command, timeout_seconds=to)
+        res: _CPP_ExecResult = self._core.execute(command=command, timeout_seconds=to, return_partial_on_timeout=ret_partial)
         _raise_on_failure(res, raise_on_error=raise_on_error, label="Command", timeout_used=to)
         return ExecutionResult.from_cpp(res) if as_dataclass else res
 
@@ -297,6 +325,7 @@ class Shell:
         args: Optional[Iterable[str]] = None,
         timeout: Optional[float] = None,
         *,
+        return_partial_on_timeout: Optional[bool] = None,
         dot_source: bool = False,
         raise_on_error: bool = False,
         as_dataclass: bool = True,
@@ -309,11 +338,13 @@ class Shell:
         - `raise_on_error` only affects Python-side exception raising; the backend
           always runs with `raise_on_error=False` to avoid double-throwing.
         """
+        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
         res: _CPP_ExecResult = self._core.execute_script(
             script_path=str(Path(script_path).resolve()),
             args=list(args or []),
             timeout_seconds=to,
+            return_partial_on_timeout=ret_partial,
             dot_source=bool(dot_source),
             raise_on_error=False,
         )
@@ -326,6 +357,7 @@ class Shell:
         named_args: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
         *,
+        return_partial_on_timeout: Optional[bool] = None,
         dot_source: bool = False,
         raise_on_error: bool = False,
         as_dataclass: bool = True,
@@ -335,11 +367,13 @@ class Shell:
         `named_args` is copied to detach from caller mutations. Keys/values must be
         strings representable in the PowerShell context (caller ensures quoting).
         """
+        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
         res: _CPP_ExecResult = self._core.execute_script_kv(
             script_path=str(Path(script_path).resolve()),
             named_args=dict(named_args or {}),
             timeout_seconds=to,
+            return_partial_on_timeout=ret_partial,
             dot_source=bool(dot_source),
             raise_on_error=False,
         )
@@ -351,25 +385,32 @@ class Shell:
         commands: Iterable[str],
         *,
         per_command_timeout: Optional[float] = None,
-        stop_on_first_error: bool = True,
+        return_partial_on_timeout: Optional[bool] = None,
         as_dataclass: bool = True,
     ) -> List[Union[ExecutionResult, _CPP_ExecResult]]:
         """Execute multiple commands sequentially in the same session.
 
         - `per_command_timeout` applies to each individual command.
-        - `stop_on_first_error` semantics are enforced by the backend.
         - Returns a list of results preserving the order of input commands.
         """
+        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
         to = _effective_timeout(per_command_timeout, self._cfg.timeout_seconds)
         vec = self._core.execute_batch(
             commands=list(commands),
             timeout_seconds=to,
+            return_partial_on_timeout=ret_partial,
         )
         if as_dataclass:
             return [ExecutionResult.from_cpp(r) for r in vec]
         return vec
 
-    def run_async(self, command: str, callback: Optional[Callable[[ExecutionResult], None]] = None, *, as_dataclass: bool = True):
+    def run_async(self, 
+                  command: str, 
+                  callback: Optional[Callable[[ExecutionResult], None]] = None,
+                  timeout: Optional[float] = None,
+                  *, 
+                  return_partial_on_timeout: Optional[bool] = None,
+                  as_dataclass: bool = True):
         """Asynchronously execute a single command.
 
         - If `callback` is provided, it is invoked on completion with the result type
@@ -378,6 +419,7 @@ class Shell:
           the returned future is a mapped proxy that yields `ExecutionResult`.
         - Exceptions in your callback are swallowed to avoid breaking the executor.
         """
+
         def _cb(py_res: _CPP_ExecResult) -> None:
             if callback is None:
                 return
@@ -386,8 +428,9 @@ class Shell:
             except Exception:
                 # Intentionally ignore to keep the executor stable.
                 pass
-
-        c_fut = self._core.execute_async(command=command, callback=_cb if callback else None)
+        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
+        to = _effective_timeout(timeout, self._cfg.timeout_seconds)
+        c_fut = self._core.execute_async(command=command, callback=_cb if callback else None, timeout_seconds=to, return_partial_on_timeout=ret_partial)
         return _map_future(c_fut, lambda r: ExecutionResult.from_cpp(r)) if as_dataclass else c_fut
 
     def run_async_batch(
@@ -396,6 +439,7 @@ class Shell:
         progress: Optional[Callable[[ _CPP_BatchProg ], None]] = None,
         *,
         per_command_timeout: Optional[float] = None,
+        return_partial_on_timeout: Optional[bool] = None,
         stop_on_first_error: bool = True,
         as_dataclass: bool = True,
     ):
@@ -405,12 +449,14 @@ class Shell:
         - Returns a Future resolving to a list of results. Mapping to `ExecutionResult`
           is applied if `as_dataclass` is True.
         """
+        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
         to = _effective_timeout(per_command_timeout, self._cfg.timeout_seconds)
         fut = self._core.execute_async_batch(
             commands=list(commands),
             progress_callback=progress if progress else None,
             stop_on_first_error=bool(stop_on_first_error),
             per_command_timeout_seconds=to,
+            return_partial_on_timeout=ret_partial,
         )
         if as_dataclass:
             return _map_future(fut, lambda vec: [ExecutionResult.from_cpp(r) for r in vec])
@@ -423,6 +469,7 @@ class Shell:
         callback: Optional[Callable[[ExecutionResult], None]] = None,
         *,
         timeout: Optional[float] = None,
+        return_partial_on_timeout: Optional[bool] = None,
         dot_source: bool = False,
         as_dataclass: bool = True,
     ):
@@ -439,13 +486,14 @@ class Shell:
                 callback(ExecutionResult.from_cpp(py_res) if as_dataclass else py_res)
             except Exception:
                 pass
-
+        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
         fut = self._core.execute_async_script(
             script_path=str(Path(script_path).resolve()),
             args=list(args or []),
             callback=_cb if callback else None,
             timeout_seconds=to,
+            return_partial_on_timeout=ret_partial,
             dot_source=bool(dot_source),
             raise_on_error=False,
         )
@@ -460,6 +508,7 @@ class Shell:
         callback: Optional[Callable[[ExecutionResult], None]] = None,
         *,
         timeout: Optional[float] = None,
+        return_partial_on_timeout: Optional[bool] = None,
         dot_source: bool = False,
         as_dataclass: bool = True,
     ):
@@ -468,11 +517,13 @@ class Shell:
         If `callback` is provided, it is wired to the returned Future using
         `add_done_callback` and receives the mapped result when available.
         """
+        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
         fut = self._core.execute_async_script_kv(
             script_path=str(Path(script_path).resolve()),
             named_args=dict(named_args or {}),
             timeout_seconds=to,
+            return_partial_on_timeout=ret_partial,
             dot_source=bool(dot_source),
             raise_on_error=False,
         )

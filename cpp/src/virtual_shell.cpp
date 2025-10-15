@@ -13,6 +13,10 @@
 #if not defined(_WIN32)
 #include <sstream>
 #endif
+
+#include "virtual_shell_debug.hpp"
+using namespace VirtualShellDebug;
+
 namespace fs = std::filesystem;
 
 constexpr auto DOT_SOURCE_PREFIX = ". ";
@@ -44,6 +48,28 @@ static std::string wstring_to_utf8(const std::wstring& w) {
 static bool send_ctrl_break(DWORD pid) {
     return GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != 0;
 }
+
+static const std::string pwshTimeoutWrapper = R"PS(
+Set-Item -Path function:Invoke-WithTimeout -Value ([ScriptBlock]::Create(@'
+param(
+    [scriptblock]$Script,
+    [int]$TimeoutSec = 5
+)
+if ($TimeoutSec -le 0) { & $Script; return }
+$job = Start-ThreadJob -ScriptBlock $Script
+try {
+    if (Wait-Job -Id $job.Id -Timeout $TimeoutSec) {
+        Receive-Job -Id $job.Id -ErrorAction Stop
+    } else {
+        Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
+        Write-Error 'timeout'
+    }
+} finally {
+    Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
+}
+'@))
+)PS";
+
 
 /**
  * Complete an overlapped I/O and report bytes read/written.
@@ -327,6 +353,8 @@ bool VirtualShell::start() {
         return false; // Pipe setup failed; cannot attach stdio to child.
     }
 
+    VSHELL_DBG("LIFECYCLE", "start() pwsh_path='%s'", config.powershellPath.c_str());
+
 #ifdef _WIN32
     STARTUPINFOA startupInfo = {};
     startupInfo.cb = sizeof(STARTUPINFOA);
@@ -447,6 +475,19 @@ bool VirtualShell::start() {
 
     (void)this->execute("$null | Out-Null", /*timeoutSeconds=*/5.0);
     (void)sendInitialCommands(); // Optional user/preset initialization; ignore failures.
+    if (config.enforceInternalTimeouts) {
+        auto fut_init = this->submit(pwshTimeoutWrapper, /*timeoutSeconds=*/30.0, /*retPartial*/0, /*cb*/{});
+        auto res_init = fut_init.get();              // VENT til BEG/END er sett
+        if (!res_init.success) {
+            VSHELL_DBG("INIT", "Invoke-WithTimeout install failed: err='%s'", res_init.err.c_str());
+            this->stop(true);
+            throw std::runtime_error("Failed to install Invoke-WithTimeout");
+        }
+        // Valgfritt: verifiser kjapt (ikke kaste hvis 'NO'; bare logg)
+        auto chk = this->submit("if (Test-Path function:Invoke-WithTimeout){'OK'}else{'NO'}", 5.0, 0, {}).get();
+        VSHELL_DBG("INIT", "Invoke-WithTimeout present: %s", (chk.out.find("OK")!=std::string::npos ? "yes" : "no"));
+        isTimeoutWrapperCreated_ = true;
+    }
 
     return true;
 }
@@ -454,6 +495,8 @@ bool VirtualShell::start() {
 void VirtualShell::stop(bool force) {
     // Fast exit if process not running
     if (!isRunning_) return; // Idempotent: safe if stop() is called multiple times.
+
+    VSHELL_DBG("LIFECYCLE", "stop(force=%d)", int(force));
 
     // 1) Signal new I/O engine to stop
     ioRunning_ = false;          // Request cooperative shutdown for writer/reader loops.
@@ -540,6 +583,8 @@ void VirtualShell::stop(bool force) {
 #else
     processId = -1; // Mark as no longer valid. FDs already closed above.
 #endif
+
+
 }
 
 bool VirtualShell::isAlive() const {
@@ -570,9 +615,9 @@ bool VirtualShell::isAlive() const {
 
 
 VirtualShell::ExecutionResult
-VirtualShell::execute(const std::string& command, double timeoutSeconds)
+VirtualShell::execute(const std::string& command, double timeoutSeconds, int retPartialOnTimeout)
 {
-    auto fut = submit(command, timeoutSeconds, nullptr);
+    auto fut = submit(command, timeoutSeconds, retPartialOnTimeout, nullptr);
     const double to = (timeoutSeconds>0?timeoutSeconds:config.timeoutSeconds); // Per-call override, else default.
 
     // Wait up to 'to' seconds for completion; do not block indefinitely.
@@ -588,16 +633,16 @@ VirtualShell::execute(const std::string& command, double timeoutSeconds)
 
 std::future<VirtualShell::ExecutionResult>
 VirtualShell::executeAsync(std::string command,
-                           std::function<void(const ExecutionResult&)> callback)
+                           std::function<void(const ExecutionResult&)> callback, double timeoutSeconds, int retPartialOnTimeout)
 {
-    // Fire-and-forget submit: timeoutSeconds=0.0 => rely on default/none; user gets a future and optional callback.
-    return submit(std::move(command), /*timeoutSeconds=*/0.0, std::move(callback));
+    return submit(std::move(command), timeoutSeconds, retPartialOnTimeout, std::move(callback));
 }
 
 VirtualShell::ExecutionResult VirtualShell::execute_script(
     const std::string& scriptPath,
     const std::vector<std::string>& args,
     double timeoutSeconds,
+    int retPartialOnTimeout,
     bool dotSource,
     bool /*raiseOnError*/)
 {
@@ -637,13 +682,14 @@ VirtualShell::ExecutionResult VirtualShell::execute_script(
     command += "$__args__ = " + argArray + ";\n";
     command += prefix + ps_quote(abs_u8) + " @__args__";
 
-    return execute(command, timeoutSeconds);
+    return execute(command, timeoutSeconds, retPartialOnTimeout);
 }
 
 std::future<VirtualShell::ExecutionResult>
 VirtualShell::executeAsync_script(std::string scriptPath,
                                   std::vector<std::string> args,
                                   double timeoutSeconds,
+                                  int retPartialOnTimeout,
                                   bool dotSource,
                                   bool /*raiseOnError*/,
                                   std::function<void(const ExecutionResult&)> callback)
@@ -696,12 +742,12 @@ VirtualShell::executeAsync_script(std::string scriptPath,
     command += prefix + ps_quote(abs_u8) + " @__args__";
 
     // Hand off to the async I/O engine; callback fires when the parser completes the command.
-    return submit(std::move(command), timeoutSeconds, std::move(callback));
+    return submit(std::move(command), timeoutSeconds, retPartialOnTimeout, std::move(callback));
 }
 
 
 VirtualShell::ExecutionResult VirtualShell::execute_batch(
-    const std::vector<std::string>& commands, double timeoutSeconds)
+    const std::vector<std::string>& commands, double timeoutSeconds, int retPartialOnTimeout)
 {
     // Pre-size buffer for single write to the child (reduces syscalls/copies).
     size_t cap = 0;
@@ -716,14 +762,15 @@ VirtualShell::ExecutionResult VirtualShell::execute_batch(
             joined.push_back('\n');
         }
     }
-    return execute(joined, timeoutSeconds);
+    return execute(joined, timeoutSeconds, retPartialOnTimeout);
 }
 
 std::future<std::vector<VirtualShell::ExecutionResult>>
 VirtualShell::executeAsync_batch(std::vector<std::string> commands,
                                  std::function<void(const BatchProgress&)> progressCallback,
                                  bool stopOnFirstError,
-                                 double perCommandTimeoutSeconds /* = 0.0 */)
+                                 double perCommandTimeoutSeconds /* = 0.0 */,
+                                 int retPartialOnTimeout /* = -1 */)
 {
     // Promise/Future returned to the caller
     auto prom = std::make_shared<std::promise<std::vector<ExecutionResult>>>();
@@ -737,6 +784,7 @@ VirtualShell::executeAsync_batch(std::vector<std::string> commands,
                  progressCallback = std::move(progressCallback),
                  stopOnFirstError,
                  perCommandTimeoutSeconds,
+                 retPartialOnTimeout,
                  p = std::move(prom)]() mutable
     {
         BatchProgress prog{};
@@ -760,6 +808,7 @@ VirtualShell::executeAsync_batch(std::vector<std::string> commands,
             // Submit single command (moves cmd to avoid copy)
             auto futOne = self->submit(std::move(cmd),
                                        perCommandTimeoutSeconds,
+                                       retPartialOnTimeout,
                                        /*cb=*/nullptr);
 
             ExecutionResult r{};
@@ -804,7 +853,9 @@ VirtualShell::executeAsync_batch(std::vector<std::string> commands,
 VirtualShell::ExecutionResult VirtualShell::execute_script_kv(
     const std::string& scriptPath,
     const std::map<std::string, std::string>& namedArgs,
-    double timeoutSeconds, bool dotSource, bool /*raiseOnError*/)
+    double timeoutSeconds,
+    int retPartialOnTimeout,
+    bool dotSource, bool /*raiseOnError*/)
 {
     namespace fs = std::filesystem;
     fs::path abs = fs::absolute(scriptPath);
@@ -837,13 +888,14 @@ VirtualShell::ExecutionResult VirtualShell::execute_script_kv(
     command.reserve(abs_u8.size() + mapStr.size() + 64);
     command += "$__params__ = " + mapStr + ";\n";
     command += prefix + ps_quote(abs_u8) + " @__params__";
-    return execute(command, timeoutSeconds);
+    return execute(command, timeoutSeconds, retPartialOnTimeout);
 }
 
 std::future<VirtualShell::ExecutionResult>
 VirtualShell::executeAsync_script_kv(std::string scriptPath,
                                      std::map<std::string, std::string> namedArgs,
                                      double timeoutSeconds,
+                                     int retPartialOnTimeout,
                                      bool dotSource,
                                      bool /*raiseOnError*/)
 {
@@ -898,7 +950,7 @@ VirtualShell::executeAsync_script_kv(std::string scriptPath,
     command += prefix + ps_quote(abs_u8) + " @__params__";
 
     // Route through the async I/O engine; no per-command callback for the KV variant.
-    return submit(std::move(command), timeoutSeconds, /*cb=*/nullptr);
+    return submit(std::move(command), timeoutSeconds, retPartialOnTimeout, /*cb=*/nullptr);
 }
 
 bool VirtualShell::sendInput(const std::string& input) {
@@ -1239,6 +1291,7 @@ void VirtualShell::writerLoop_() {
                 ioRunning_ = false; // Input pipe no longer valid; stop loop.
                 break;
             }
+
             if (!writeToPipe(hInputWrite, pkt)) {
                 // Child may have exited or pipe is broken; exit cleanly.
                 ioRunning_ = false;
@@ -1532,41 +1585,48 @@ bool VirtualShell::waitForProcess(int timeoutMs) {
 }
 
 std::string VirtualShell::build_pwsh_packet(uint64_t id, std::string_view cmd) {
+    const std::string beg = "<<<SS_BEG_" + std::to_string(id) + ">>>";
+    const std::string end = "<<<SS_END_" + std::to_string(id) + ">>>";
 
-    // Old version with RS chars:
-    /*
-    // Compose a unique end-marker using the ASCII Record Separator (RS, 0x1E).
-    // Using RS minimizes accidental collisions with normal output.
-    
-    constexpr char RS = '\x1E';
-    std::string marker;
-    marker.reserve(16);
-    marker.push_back(RS);
-    marker += "SS_END_";
-    marker += std::to_string(id);
-    marker.push_back(RS);
-    */
+    auto ps_quote_single = [](std::string_view s) {
+        std::string t; t.reserve(s.size()+2);
+        t.push_back('\'');
+        for (char c : s) t += (c=='\'' ? "''" : std::string(1, c));
+        t.push_back('\'');
+        return t;
+    };
 
-    // New version without RS chars, to avoid issues with some encodings/terminals.
-    std::string marker = "<<<SS_END_" + std::to_string(id) + ">>>";
-
-    // Single-allocation reserve for the final payload.
-    // Layout:
-    //   <cmd>\n
-    //   [Console]::Out.WriteLine('<escaped marker>')\n
-    // The marker is printed to STDOUT only; stderr has its own stream.
     std::string full;
-    full.reserve(cmd.size() + marker.size() + 64);
+    full.reserve(cmd.size() + beg.size() + end.size() + 96);
+
+    // 1) BEG neds quoting
+    full += "[Console]::Out.WriteLine(" + ps_quote_single(beg) + ")\n";
+
+    // 2) COMMAND ( may contain multiple lines; must end with newline)
     full.append(cmd);
-    full.append("\n[Console]::Out.WriteLine('");
-    // PowerShell single-quote escaping: duplicate ' inside single-quoted strings.
-    for (char c : marker) full += (c=='\'' ? "''" : std::string(1,c));
-    full.append("')\n");
+    if (full.empty() || full.back() != '\n') full.push_back('\n');
+
+    // 3) END neds quoting
+    full += "[Console]::Out.WriteLine(" + ps_quote_single(end) + ")\n";
+
     return full;
 }
 
+std::string VirtualShell::wrap_with_internal_timeout(std::string_view cmd, double timeoutSec) {
+    std::string s;
+    s.reserve(cmd.size() + 256);
+    s += "$__vs_cmd = [ScriptBlock]::Create(@'\n";
+    s.append(cmd.begin(), cmd.end());
+    if (s.empty() || s.back() != '\n') s.push_back('\n');
+    s += "'@)\n";
+    s += "try { Invoke-WithTimeout -Script $__vs_cmd -TimeoutSec " + std::to_string((int)timeoutSec) + " }\n";
+    s += "catch { [Console]::Error.WriteLine($_.Exception.Message) }\n";
+    return s;
+}
+
+
 std::future<VirtualShell::ExecutionResult>
-VirtualShell::submit(std::string command, double timeoutSeconds,
+VirtualShell::submit(std::string command, double timeoutSeconds, int retPartialOnTimeout,
                      std::function<void(const ExecutionResult&)> cb)
 {
     if (!isRunning_) {
@@ -1578,6 +1638,11 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
         p.set_value(std::move(r));
         return p.get_future();
     }
+    
+
+    bool retTimeout = (retPartialOnTimeout < 0)
+            ? config.returnPartialOutputOnTimeout
+            : (retPartialOnTimeout != 0);
 
     // Monotonic sequence for correlating output to this request.
     const uint64_t id = ++seq_;
@@ -1588,18 +1653,26 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
     S->tStart = clock::now();
     S->timeoutSec = (timeoutSeconds > 0 ? timeoutSeconds : config.timeoutSeconds);
     S->id = id;
-
+    S->beginMarker = "<<<SS_BEG_" + std::to_string(id) + ">>>";
     S->endMarker = "<<<SS_END_" + std::to_string(id) + ">>>";
     S->timeoutSec = (timeoutSeconds > 0 ? timeoutSeconds : config.timeoutSeconds);
     S->cb = std::move(cb);
+    S->retPartialOnTimeout = retTimeout;
     if (S->timeoutSec > 0.0) {
-        auto delta = std::chrono::duration<double>(S->timeoutSec);
-        S->tDeadline = S->tStart + std::chrono::duration_cast<clock::duration>(delta);
+        if (config.enforceInternalTimeouts && isTimeoutWrapperCreated_) {
+             S->tDeadline = S->tStart + std::chrono::milliseconds((long)((S->timeoutSec + 0.5) * 1000));
+        } else {
+            auto delta = std::chrono::duration<double>(S->timeoutSec);
+            S->tDeadline = S->tStart + std::chrono::duration_cast<clock::duration>(delta);
+        }
     } else {
-        S->tDeadline = clock::time_point::max(); // No timeout.
+        S->tDeadline = clock::time_point::max();
     }
-    auto fut = S->prom.get_future();
+    
+    VSHELL_DBG("SUBMIT", "id=%llu cmd='%s' timeout=%.3f returnPartial=%d",
+           (unsigned long long)id, command.c_str(), S->timeoutSec, int(retTimeout));
 
+    auto fut = S->prom.get_future();
     {
         // Register in-flight command before enqueueing write, so readers can demux immediately.
         std::lock_guard<std::mutex> lk(stateMx_);
@@ -1614,10 +1687,16 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
         /* CAS-loop */
     }
 
+    std::string cmd = std::move(command);
+    if (config.enforceInternalTimeouts && isTimeoutWrapperCreated_ && S->timeoutSec > 0.0) {
+        cmd = wrap_with_internal_timeout(cmd, S->timeoutSec);
+    }
+
     {
         // Enqueue packetized command for the writer thread.
         std::lock_guard<std::mutex> lk(writeMx_);
-        writeQueue_.emplace_back(build_pwsh_packet(id, command));
+        writeQueue_.emplace_back(build_pwsh_packet(id, cmd));
+        VSHELL_DBG("IO", "write id=%llu bytes=%zu", (unsigned long long)id, writeQueue_.back().size());
     }
     writeCv_.notify_one();
 
@@ -1626,6 +1705,8 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
 
 void VirtualShell::onChunk_(bool isErr, std::string_view sv) {
     if (sv.empty()) return;
+
+    VSHELL_DBG("IO", "read %s bytes=%zu", isErr ? "STDERR" : "STDOUT", sv.size());
 
     std::unique_lock<std::mutex> lk(stateMx_);
 
@@ -1649,7 +1730,6 @@ void VirtualShell::onChunk_(bool isErr, std::string_view sv) {
     }
 
     // STDOUT: may contain multiple completions in a single chunk.
-    // We carry any bytes *after* a found end-marker into the next command.
     std::string carry; carry.assign(sv.data(), sv.size());
 
     while (!carry.empty() && !inflightOrder_.empty()) {
@@ -1658,53 +1738,87 @@ void VirtualShell::onChunk_(bool isErr, std::string_view sv) {
         if (it == inflight_.end()) {
             // Unexpected: queue says there's an active id, but map doesn't have it.
             // Drop from queue and continue.
+
+            VSHELL_DBG("PARSE", "drop expired front id=%llu (pre-begun=%d)",
+                       static_cast<unsigned long long>(id), 0);
             inflightOrder_.pop_front();
             continue;
         }
+
         CmdState& S = *it->second;
 
-        // Append current chunk to this command's stdout buffer.
-        // DEV NOTE (perf): this grows S.outBuf and then searches from the beginning each time.
-        // If outputs are very large, consider a rolling search to avoid O(n^2) behavior.
+        if (!S.begun) {
+            // Look for beginMarker in preBuf + carry
+            S.preBuf.append(carry);
+
+            size_t bpos = S.preBuf.find(S.beginMarker);
+            if (bpos == std::string::npos) {
+                // Not found yet: trim preBuf if too large (avoid unbounded growth)
+                constexpr size_t CAP = 256 * 1024;
+                if (S.preBuf.size() > CAP) {
+                    // Keep only the last CAP bytes
+                    S.preBuf.erase(0, S.preBuf.size() - CAP);
+                }
+                // All of carry consumed
+                carry.clear();
+                break;
+            }
+
+            // Jump past beginMarker (+ optional CRLF)
+            size_t after = bpos + S.beginMarker.size();
+            if (after < S.preBuf.size() && S.preBuf[after] == '\r') ++after;
+            if (after < S.preBuf.size() && S.preBuf[after] == '\n') ++after;
+
+            // We found the begin marker; prepare post-begin carry
+            std::string postBeg;
+            if (after < S.preBuf.size()) {
+                postBeg.assign(S.preBuf.data() + after, S.preBuf.size() - after);
+            }
+            S.preBuf.clear();   // done with pre-noise
+            S.begun = true;
+            VSHELL_DBG("PARSE", "BEGIN id=%llu", static_cast<unsigned long long>(id));
+
+
+            // Now we replace carry with the data bytes after BEG and continue as before
+            carry.swap(postBeg);
+            // fall-through to END-scan below
+        }
+
         S.outBuf.append(carry);
 
-        // Look for this command's end marker in its buffer.
         const size_t mpos = S.outBuf.find(S.endMarker);
         if (mpos == std::string::npos) {
-            // Not finished yet—wait for more data.
             carry.clear();
             break;
         }
 
-        // Compute the tail offset just after the marker, skipping optional CRLF.
+        // Jump past end marker (+ optional CRLF) and prepare nextCarry for next command
         size_t tail = mpos + S.endMarker.size();
         if (tail < S.outBuf.size() && S.outBuf[tail] == '\r') ++tail;
         if (tail < S.outBuf.size() && S.outBuf[tail] == '\n') ++tail;
 
-        // Save any trailing bytes after the marker to feed into the next command.
         std::string nextCarry;
         if (tail < S.outBuf.size()) {
             nextCarry.assign(S.outBuf.data() + tail, S.outBuf.size() - tail);
         }
 
-        // Trim marker + trailing CRLF from this command's buffer; outBuf now contains only payload.
+        // Truncate outBuf to just the command's output (up to but not including END marker)
         S.outBuf.resize(mpos);
 
-        // Complete this command while holding stateMx_ to preserve invariants
-        // (e.g., no observer sees an already-erased state). completeCmdLocked_ may
-        // resolve futures and queue callbacks, so keep any external effects minimal under lock.
+        VSHELL_DBG("PARSE", "END id=%llu out_len=%zu err_len=%zu",
+           (unsigned long long)id, S.outBuf.size(), S.errBuf.size());
+
+        // Complete this command
         completeCmdLocked_(S, /*success=*/true);
 
-        // Remove from structures and decrement in-flight count.
         inflight_.erase(it);
         inflightOrder_.pop_front();
 
-        // Drop the lock around atomics/callbacks to avoid lock contention and re-entrancy issues.
         lk.unlock();
         inflightCount_.fetch_sub(1, std::memory_order_relaxed);
         lk.lock();
 
-        // Continue parsing with the carried tail as input to the next command in the queue.
+        // Continue parsing with the remaining bytes (belonging to the next command)
         carry.swap(nextCarry);
     }
 }
@@ -1720,6 +1834,11 @@ void VirtualShell::completeCmdLocked_(CmdState& S, bool success) {
     r.out   = std::move(S.outBuf);
     r.err    = std::move(S.errBuf);
     r.executionTime = std::chrono::duration<double>(now - S.tStart).count();
+
+    VSHELL_DBG("COMPLETE", "id=%llu success=%d exit=%d timedOut=%d out=%zu err=%zu",
+           (unsigned long long)S.id, int(r.success), r.exitCode, int(S.timedOut.load()),
+           r.out.size(), r.err.size());
+
 
     // Resolve the promise first (primary completion path).
     try { S.prom.set_value(r); } catch (...) {}
@@ -1737,6 +1856,7 @@ void VirtualShell::timeoutOne_(uint64_t id) {
         auto it = inflight_.find(id);
         if (it == inflight_.end()) return;
         st = std::move(it->second);
+        st->timedOut.store(true);
         inflight_.erase(it);
 
         // Remove also from ordering queue.
@@ -1750,14 +1870,18 @@ void VirtualShell::timeoutOne_(uint64_t id) {
 
     if (!st) return;
 
+    VSHELL_DBG("TIMEOUT", "id=%llu retPartial=%d out_so_far=%zu",
+           (unsigned long long)id, int(st->retPartialOnTimeout), st->outBuf.size());
+
     inflightCount_.fetch_sub(1, std::memory_order_relaxed);
 
     ExecutionResult r{};
     r.success  = false;
     r.exitCode = -1;
     r.err    = "timeout";
-    // NOTE: If you want late stdout/stderr to be ignored, ensure the reader
-    // checks S.timedOut or absence from inflight_ before appending.
+    if (st->retPartialOnTimeout) {
+        r.out = std::move(st->outBuf);
+    }
 
     try { st->prom.set_value(r); } catch (...) {}
     if (st->cb) { try { st->cb(r); } catch (...) {} }

@@ -65,6 +65,7 @@
  */
 class VirtualShell : public std::enable_shared_from_this<VirtualShell> {
     static std::string build_pwsh_packet(uint64_t id, std::string_view cmd);
+    static std::string wrap_with_internal_timeout(std::string_view cmd, double timeoutSec);
 public:
     struct OutChunk { bool isErr; std::string data; };
 
@@ -98,6 +99,8 @@ public:
         std::string workingDirectory = "";        ///< Working directory (empty = current directory)
         bool captureOutput = true;                ///< Capture stdout
         bool captureError  = true;                ///< Capture stderr
+        bool returnPartialOutputOnTimeout = false; ///< If true, return whatever output was captured before a timeout
+        bool enforceInternalTimeouts = false;     ///< If true, enforce timeouts on all commands (default: only if specified)
         int  timeoutSeconds = 30;                 ///< Default per-command timeout (seconds)
         std::map<std::string, std::string> environment;   ///< Extra environment variables
         std::vector<std::string> initialCommands;         ///< Commands to run right after startup
@@ -111,9 +114,13 @@ public:
         std::promise<ExecutionResult>      prom;        ///< Promise to deliver the command result
         std::string                        outBuf;      ///< Accumulated stdout buffer
         std::string                        errBuf;      ///< Accumulated stderr buffer
+        std::string                        beginMarker; ///< Unique begin marker (e.g. "\x1ESS_BEG_123\x1E")
         std::string                        endMarker;   ///< Unique marker string (e.g. "\x1ESS_END_123\x1E")
+        std::atomic<bool>                  begun{false};///< True once begin marker has been seen
+        std::string                        preBuf;      ///< Buffer for data before begin marker
         std::atomic<bool>                  done{false}; ///< True once command is completed
         std::atomic<bool>                  timedOut{false}; ///< True if command exceeded timeout
+        std::atomic<bool>                  retPartialOnTimeout{false}; ///< Whether to return partial output on timeout
         double                             startMonotonic{}; ///< Start time in monotonic seconds
         double                             timeoutSec{}; ///< Timeout in seconds for this command
         std::function<void(const ExecutionResult&)> cb;  ///< Optional callback for completion
@@ -173,6 +180,7 @@ private:
      */
     std::future<ExecutionResult> submit(std::string command,
                                         double timeoutSeconds,
+                                        int retPartialOnTimeout,
                                         std::function<void(const ExecutionResult&)> cb = nullptr);
 
     std::string lastOutput; ///< Last captured stdout (for sync APIs)
@@ -321,7 +329,7 @@ public:
      * @param timeoutSeconds Optional timeout for this command (0 = use default)
      * @return ExecutionResult Result object containing output, error, and exit code
      */
-    ExecutionResult execute(const std::string& command, double timeoutSeconds = 0.0);
+    ExecutionResult execute(const std::string& command, double timeoutSeconds = 0.0, int retPartialOnTimeout = -1);
 
     /**
      * @brief Execute a batch of PowerShell commands synchronously.
@@ -332,7 +340,7 @@ public:
      * @param timeoutSeconds Timeout per command (0 = use default)
      * @return ExecutionResult Final result (aggregate or last command depending on implementation)
      */
-    ExecutionResult execute_batch(const std::vector<std::string>& commands, double timeoutSeconds = 0.0);
+    ExecutionResult execute_batch(const std::vector<std::string>& commands, double timeoutSeconds = 0.0, int retPartialOnTimeout = -1);
 
     /**
      * @brief Execute a PowerShell script with named parameters (key/value pairs).
@@ -348,6 +356,7 @@ public:
         const std::string& scriptPath,
         const std::map<std::string, std::string>& namedArgs,
         double timeoutSeconds = 0.0,
+        int retPartialOnTimeout = -1,
         bool dotSource = false,
         bool raiseOnError = false);
 
@@ -364,7 +373,8 @@ public:
     ExecutionResult execute_script(
         const std::string& scriptPath,
         const std::vector<std::string>& args,
-        double timeoutSeconds,
+        double timeoutSeconds = 0.0,
+        int retPartialOnTimeout = -1,
         bool dotSource = false,
         bool raiseOnError = false);
 
@@ -377,7 +387,9 @@ public:
      */
     std::future<ExecutionResult>
     executeAsync(std::string command,
-                std::function<void(const ExecutionResult&)> callback = nullptr);
+                std::function<void(const ExecutionResult&)> callback = nullptr,
+                double timeoutSeconds = 0.0,
+                int retPartialOnTimeout = -1);
 
     /**
      * @brief Execute a batch of commands asynchronously.
@@ -394,7 +406,8 @@ public:
     executeAsync_batch(std::vector<std::string> commands,
                                  std::function<void(const BatchProgress&)> progressCallback,
                                  bool stopOnFirstError,
-                                 double perCommandTimeoutSeconds = 0.0);
+                                 double perCommandTimeoutSeconds = 0.0,
+                                 int retPartialOnTimeout = -1);
 
     /**
      * @brief Execute a script asynchronously with positional arguments.
@@ -411,6 +424,7 @@ public:
         std::string scriptPath,
         std::vector<std::string> args,
         double timeoutSeconds,
+        int retPartialOnTimeout = -1,
         bool dotSource = false,
         bool raiseOnError = false,
         std::function<void(const ExecutionResult&)> callback = {}
@@ -429,11 +443,10 @@ public:
     std::future<ExecutionResult> executeAsync_script_kv(
         std::string scriptPath,
         std::map<std::string, std::string> namedArgs,
-        double timeoutSeconds,
+        double timeoutSeconds = 0.0,
+        int retPartialOnTimeout = -1,
         bool dotSource = false,
         bool raiseOnError = false);
-
-
 
     /**
      * @brief Send raw input to the PowerShell process.
@@ -694,5 +707,6 @@ private:
      * @return True if process responded within timeout, false otherwise
      */
     bool waitForProcess(int timeoutMs = 5000);
-
+    
+    bool isTimeoutWrapperCreated_ = false; ///< True if the internal timeout wrapper function is created
 };
