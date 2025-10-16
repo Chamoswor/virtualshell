@@ -1568,7 +1568,7 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
         // Enqueue packetized command for the writer thread.
         std::lock_guard<std::mutex> lk(writeMx_);
         writeQueue_.emplace_back(build_pwsh_packet(id, cmd));
-        VSHELL_DBG("IO", "write id=%llu bytes=%zu", (unsigned long long)id, writeQueue_.back().size());
+        VSHELL_DBG("IO", "write id=%llu bytes=%zu cmd=%s", (unsigned long long)id, writeQueue_.back().size(), cmd.c_str());
     }
     writeCv_.notify_one();
 
