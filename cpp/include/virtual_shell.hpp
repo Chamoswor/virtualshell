@@ -60,7 +60,6 @@
  */
 class VirtualShell : public std::enable_shared_from_this<VirtualShell> {
     static std::string build_pwsh_packet(uint64_t id, std::string_view cmd);
-    static std::string wrap_with_internal_timeout(std::string_view cmd, double timeoutSec);
 public:
     struct OutChunk { bool isErr; std::string data; };
 
@@ -94,11 +93,12 @@ public:
         std::string workingDirectory = "";        ///< Working directory (empty = current directory)
         bool captureOutput = true;                ///< Capture stdout
         bool captureError  = true;                ///< Capture stderr
-        bool returnPartialOutputOnTimeout = false; ///< If true, return whatever output was captured before a timeout
-        bool enforceInternalTimeouts = false;     ///< If true, enforce timeouts on all commands (default: only if specified)
+        bool autoRestartOnTimeout = true;            ///< If true, restart the process on command timeout
         int  timeoutSeconds = 30;                 ///< Default per-command timeout (seconds)
         std::map<std::string, std::string> environment;   ///< Extra environment variables
         std::vector<std::string> initialCommands;         ///< Commands to run right after startup
+        std::string restoreScriptPath = "";       ///< Optional path to get-session.ps1
+        std::string sessionSnapshotPath = "";     ///< Optional path to session_{RUN-ID}.xml
     };
 
     /**
@@ -115,7 +115,6 @@ public:
         std::string                        preBuf;      ///< Buffer for data before begin marker
         std::atomic<bool>                  done{false}; ///< True once command is completed
         std::atomic<bool>                  timedOut{false}; ///< True if command exceeded timeout
-        std::atomic<bool>                  retPartialOnTimeout{false}; ///< Whether to return partial output on timeout
         double                             startMonotonic{}; ///< Start time in monotonic seconds
         double                             timeoutSec{}; ///< Timeout in seconds for this command
         std::function<void(const ExecutionResult&)> cb;  ///< Optional callback for completion
@@ -145,7 +144,8 @@ private:
 
     Config config;                        ///< Current process configuration
     std::atomic<bool> isRunning_{false};  ///< True if PowerShell process is alive
-    std::atomic<bool> shouldStop{false};  ///< Flag to serialize and request process termination
+    std::atomic<bool> lifecycleGate_{false};  ///< Blocks submissions while lifecycle transitions run
+    std::atomic<bool> isRestarting_{false}; ///< True if a restart is in progress
     std::mutex stopMx_;                   ///< Serializes stop() invocations
     
     std::thread writerTh_;                ///< Writer thread (stdin feeder)
@@ -176,8 +176,7 @@ private:
      */
     std::future<ExecutionResult> submit(std::string command,
                                         double timeoutSeconds,
-                                        int retPartialOnTimeout,
-                                        std::function<void(const ExecutionResult&)> cb = nullptr);
+                                        std::function<void(const ExecutionResult&)> cb = nullptr, bool bypassRestart = false);
 
     std::string lastOutput; ///< Last captured stdout (for sync APIs)
     std::string lastError;  ///< Last captured stderr (for sync APIs)
@@ -224,7 +223,7 @@ private:
     void timeoutScan_();
 
     void fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSentinel);
-    void requestStopAsync_(bool force);
+    void requestRestartAsync_(bool force);
 
     std::thread timerThread_;       ///< Background watchdog thread for timeouts
     std::atomic<bool> timerRun_{false}; ///< True while timeout watchdog is active
@@ -320,6 +319,8 @@ public:
      * @return false otherwise
      */
     bool isAlive() const;
+
+    bool isRestarting() const { return isRestarting_.load(std::memory_order_acquire); }
     
 
     /**
@@ -329,7 +330,7 @@ public:
      * @param timeoutSeconds Optional timeout for this command (0 = use default)
      * @return ExecutionResult Result object containing output, error, and exit code
      */
-    ExecutionResult execute(const std::string& command, double timeoutSeconds = 0.0, int retPartialOnTimeout = -1);
+    ExecutionResult execute(const std::string& command, double timeoutSeconds = 0.0);
 
     /**
      * @brief Execute a batch of PowerShell commands synchronously.
@@ -340,7 +341,7 @@ public:
      * @param timeoutSeconds Timeout per command (0 = use default)
      * @return ExecutionResult Final result (aggregate or last command depending on implementation)
      */
-    ExecutionResult execute_batch(const std::vector<std::string>& commands, double timeoutSeconds = 0.0, int retPartialOnTimeout = -1);
+    ExecutionResult execute_batch(const std::vector<std::string>& commands, double timeoutSeconds = 0.0);
 
     /**
      * @brief Execute a PowerShell script with named parameters (key/value pairs).
@@ -356,7 +357,6 @@ public:
         const std::string& scriptPath,
         const std::map<std::string, std::string>& namedArgs,
         double timeoutSeconds = 0.0,
-        int retPartialOnTimeout = -1,
         bool dotSource = false,
         bool raiseOnError = false);
 
@@ -374,7 +374,6 @@ public:
         const std::string& scriptPath,
         const std::vector<std::string>& args,
         double timeoutSeconds = 0.0,
-        int retPartialOnTimeout = -1,
         bool dotSource = false,
         bool raiseOnError = false);
 
@@ -388,8 +387,7 @@ public:
     std::future<ExecutionResult>
     executeAsync(std::string command,
                 std::function<void(const ExecutionResult&)> callback = nullptr,
-                double timeoutSeconds = 0.0,
-                int retPartialOnTimeout = -1);
+                double timeoutSeconds = 0.0);
 
     /**
      * @brief Execute a batch of commands asynchronously.
@@ -406,8 +404,7 @@ public:
     executeAsync_batch(std::vector<std::string> commands,
                                  std::function<void(const BatchProgress&)> progressCallback,
                                  bool stopOnFirstError,
-                                 double perCommandTimeoutSeconds = 0.0,
-                                 int retPartialOnTimeout = -1);
+                                 double perCommandTimeoutSeconds = 0.0);
 
     /**
      * @brief Execute a script asynchronously with positional arguments.
@@ -424,7 +421,6 @@ public:
         std::string scriptPath,
         std::vector<std::string> args,
         double timeoutSeconds,
-        int retPartialOnTimeout = -1,
         bool dotSource = false,
         bool raiseOnError = false,
         std::function<void(const ExecutionResult&)> callback = {}
@@ -444,7 +440,6 @@ public:
         std::string scriptPath,
         std::map<std::string, std::string> namedArgs,
         double timeoutSeconds = 0.0,
-        int retPartialOnTimeout = -1,
         bool dotSource = false,
         bool raiseOnError = false);
 
@@ -708,5 +703,4 @@ private:
      */
     bool waitForProcess(int timeoutMs = 5000);
     
-    bool isTimeoutWrapperCreated_ = false; ///< True if the internal timeout wrapper function is created
 };

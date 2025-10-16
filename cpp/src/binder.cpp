@@ -257,15 +257,16 @@ PYBIND11_MODULE(_core, m) {
     // Config
     py::class_<VirtualShell::Config>(m, "Config")
         .def(py::init<>())
-        .def_readwrite("powershell_path",    &VirtualShell::Config::powershellPath)
-        .def_readwrite("working_directory",  &VirtualShell::Config::workingDirectory)
-        .def_readwrite("capture_output",     &VirtualShell::Config::captureOutput)
-        .def_readwrite("capture_error",      &VirtualShell::Config::captureError)
-        .def_readwrite("return_partial_output_on_timeout", &VirtualShell::Config::returnPartialOutputOnTimeout)
-        .def_readwrite("enforce_internal_timeouts", &VirtualShell::Config::enforceInternalTimeouts)
-        .def_readwrite("timeout_seconds",    &VirtualShell::Config::timeoutSeconds)
-        .def_readwrite("environment",        &VirtualShell::Config::environment)
-        .def_readwrite("initial_commands",   &VirtualShell::Config::initialCommands)
+        .def_readwrite("powershell_path",      &VirtualShell::Config::powershellPath)
+        .def_readwrite("working_directory",    &VirtualShell::Config::workingDirectory)
+        .def_readwrite("capture_output",       &VirtualShell::Config::captureOutput)
+        .def_readwrite("capture_error",        &VirtualShell::Config::captureError)
+        .def_readwrite("auto_restart_on_timeout", &VirtualShell::Config::autoRestartOnTimeout)
+        .def_readwrite("timeout_seconds",      &VirtualShell::Config::timeoutSeconds)
+        .def_readwrite("environment",          &VirtualShell::Config::environment)
+        .def_readwrite("initial_commands",     &VirtualShell::Config::initialCommands)
+        .def_readwrite("restore_script_path",  &VirtualShell::Config::restoreScriptPath)
+        .def_readwrite("session_snapshot_path", &VirtualShell::Config::sessionSnapshotPath)
         .def("__repr__", [](const VirtualShell::Config& c) {
             return "<Config powershell_path='" + c.powershellPath +
                    "' timeout=" + std::to_string(c.timeoutSeconds) + "s>";
@@ -284,17 +285,14 @@ PYBIND11_MODULE(_core, m) {
         // Sync commands
         .def("execute", &VirtualShell::execute,
              py::arg("command"), py::arg("timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              "Execute a PowerShell command synchronously")
         .def("execute_batch", &VirtualShell::execute_batch,
              py::arg("commands"), py::arg("timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              "Execute a batch of PowerShell commands synchronously")
         .def("execute_script", &VirtualShell::execute_script,
              py::arg("script_path"),
              py::arg("args") = std::vector<std::string>{},
              py::arg("timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              py::arg("dot_source") = false,
              py::arg("raise_on_error") = false,
              "Execute a PowerShell script file synchronously")
@@ -302,7 +300,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("script_path"),
              py::arg("named_args"),
              py::arg("timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              py::arg("dot_source") = false,
              py::arg("raise_on_error") = false,
              "Execute script with named parameters via hashtable splatting")
@@ -312,15 +309,13 @@ PYBIND11_MODULE(_core, m) {
              [](std::shared_ptr<VirtualShell> self,
                 std::string command,
                 py::object callback /* = None */,
-                double timeout_seconds = 0.0,
-                int retPartialOnTimeout = -1) {
-                 auto fut = self->executeAsync(std::move(command),/*cb*/ nullptr, timeout_seconds, retPartialOnTimeout);
+                double timeout_seconds = 0.0) {
+                 auto fut = self->executeAsync(std::move(command),/*cb*/ nullptr, timeout_seconds);
                  return make_py_future_from_std_future(std::move(fut), std::move(callback));
              },
              py::arg("command"),
              py::arg("callback") = py::none(),
              py::arg("timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              "Execute a PowerShell command asynchronously and return a Python Future")
 
         // Async: batch (snake_case) + camelCase alias
@@ -329,8 +324,7 @@ PYBIND11_MODULE(_core, m) {
                 std::vector<std::string> commands,
                 py::object progress_cb /* = None */,
                 bool stop_on_first_error,
-                double per_command_timeout_seconds,
-                int retPartialOnTimeout) {
+                double per_command_timeout_seconds) {
 
                  std::function<void(const VirtualShell::BatchProgress&)> cpp_cb;
                  if (!progress_cb.is_none()) {
@@ -358,8 +352,7 @@ PYBIND11_MODULE(_core, m) {
                      std::move(commands),
                      cpp_cb,
                      stop_on_first_error,
-                     per_command_timeout_seconds,
-                     retPartialOnTimeout
+                     per_command_timeout_seconds
                  );
                  return make_py_future_from_std_future_vec(std::move(fut));
              },
@@ -367,7 +360,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("progress_callback") = py::none(),
              py::arg("stop_on_first_error") = true,
              py::arg("per_command_timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              "Execute a batch asynchronously (returns Future[List[ExecutionResult]])")
 
         .def("executeAsync_batch",
@@ -375,8 +367,7 @@ PYBIND11_MODULE(_core, m) {
                 std::vector<std::string> commands,
                 py::object progress_cb /* = None */,
                 bool stop_on_first_error,
-                double per_command_timeout_seconds,
-                int retPartialOnTimeout) {
+                double per_command_timeout_seconds) {
 
                  std::function<void(const VirtualShell::BatchProgress&)> cpp_cb;
                  if (!progress_cb.is_none()) {
@@ -402,8 +393,7 @@ PYBIND11_MODULE(_core, m) {
                      std::move(commands),
                      cpp_cb,
                      stop_on_first_error,
-                     per_command_timeout_seconds,
-                     retPartialOnTimeout
+                     per_command_timeout_seconds
                  );
                  return make_py_future_from_std_future_vec(std::move(fut));
              },
@@ -411,7 +401,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("progress_callback") = py::none(),
              py::arg("stop_on_first_error") = true,
              py::arg("per_command_timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              "Execute a batch asynchronously (returns Future[List[ExecutionResult]])")
 
         // Async: script
@@ -421,14 +410,12 @@ PYBIND11_MODULE(_core, m) {
                 std::vector<std::string> args,
                 py::object callback /* = None */,
                 double timeout_seconds,
-                int retPartialOnTimeout,
                 bool dot_source,
                 bool /*raise_on_error*/) {
                  auto fut = self->executeAsync_script(
                      std::move(script_path),
                      std::move(args),
                      timeout_seconds,
-                     retPartialOnTimeout,
                      dot_source,
                      /*raiseOnError*/ false,
                      /*cb*/ nullptr
@@ -439,7 +426,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("args") = std::vector<std::string>{},
              py::arg("callback") = py::none(),
              py::arg("timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              py::arg("dot_source") = false,
              py::arg("raise_on_error") = false)
 
@@ -448,14 +434,12 @@ PYBIND11_MODULE(_core, m) {
                 std::string script_path,
                 std::vector<std::string> args,
                 double timeout_seconds,
-                int retPartialOnTimeout,
                 bool dot_source,
                 bool /*raise_on_error*/) {
                  auto fut = self->executeAsync_script(
                      std::move(script_path),
                      std::move(args),
                      timeout_seconds,
-                     retPartialOnTimeout,
                      dot_source,
                      /*raiseOnError*/ false,
                      /*cb*/ nullptr
@@ -465,7 +449,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("script_path"),
              py::arg("args") = std::vector<std::string>{},
              py::arg("timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              py::arg("dot_source") = false,
              py::arg("raise_on_error") = false)
 
@@ -475,14 +458,12 @@ PYBIND11_MODULE(_core, m) {
                 std::string script_path,
                 std::map<std::string,std::string> named_args,
                 double timeout_seconds,
-                int retPartialOnTimeout,
                 bool dot_source,
                 bool /*raise_on_error*/) {
                  auto fut = self->executeAsync_script_kv(
                      std::move(script_path),
                      std::move(named_args),
                      timeout_seconds,
-                     retPartialOnTimeout,
                      dot_source,
                      /*raiseOnError*/ false
                  );
@@ -491,7 +472,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("script_path"),
              py::arg("named_args"),
              py::arg("timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              py::arg("dot_source") = false,
              py::arg("raise_on_error") = false)
 
@@ -500,14 +480,12 @@ PYBIND11_MODULE(_core, m) {
                 std::string script_path,
                 std::map<std::string,std::string> named_args,
                 double timeout_seconds,
-                int retPartialOnTimeout,
                 bool dot_source,
                 bool /*raise_on_error*/) {
                  auto fut = self->executeAsync_script_kv(
                      std::move(script_path),
                      std::move(named_args),
                      timeout_seconds,
-                     retPartialOnTimeout,
                      dot_source,
                      /*raiseOnError*/ false
                  );
@@ -516,7 +494,6 @@ PYBIND11_MODULE(_core, m) {
              py::arg("script_path"),
              py::arg("named_args"),
              py::arg("timeout_seconds") = 0.0,
-             py::arg("return_partial_on_timeout") = -1,
              py::arg("dot_source") = false,
              py::arg("raise_on_error") = false)
 
@@ -537,6 +514,8 @@ PYBIND11_MODULE(_core, m) {
 
         .def("get_config",   &VirtualShell::getConfig, py::return_value_policy::reference_internal)
         .def("update_config",&VirtualShell::updateConfig, py::arg("config"))
+
+        .def("is_restarting", &VirtualShell::isRestarting)
 
         .def("__repr__", [](const VirtualShell& shell) {
             return std::string("<VirtualShell running=") + (shell.isAlive() ? "1" : "0") + ">";

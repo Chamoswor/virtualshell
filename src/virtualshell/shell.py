@@ -29,6 +29,9 @@ Compatibility:
 from __future__ import annotations
 
 import importlib
+import secrets
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Dict, Optional, Callable, Any, Union
@@ -37,7 +40,6 @@ import concurrent.futures as cf
 
 _CPP_MODULE: Any = None
 
-import importlib
 try:
     _CPP_MODULE = importlib.import_module(f"{__package__}._core")
 except Exception as e:
@@ -62,6 +64,15 @@ from .errors import (
     ExecutionTimeoutError,
     ExecutionError,
 )
+
+@dataclass
+class ExitCode:
+    """Convenience wrapper for common exit codes."""
+    SUCCESS: int = 0
+    GENERAL_ERROR: int = 1
+    TIMEOUT: int = -1
+    RESTARTING: int = -2  # Internal use; not from PowerShell itself.
+    NOT_RUNNING: int = -3  # Internal use; not from PowerShell itself.
 
 # ---------- Utils ----------
 def quote_pwsh_literal(s: str) -> str:
@@ -101,6 +112,7 @@ def _raise_on_failure(
     res: _CPP_ExecResult,
     *,
     raise_on_error: bool,
+    raise_on_timeout: bool = True,
     label: str,
     timeout_used: Optional[float],
 ) -> None:
@@ -118,7 +130,7 @@ def _raise_on_failure(
         return
     err = (res.err or "")
     err_lower = err.lower()
-    if res.exit_code == -1 and any(
+    if res.exit_code == -1 and raise_on_timeout and any(
         token in err_lower for token in ("timeout", "timed out", "time-out", "time out")
     ):
         raise ExecutionTimeoutError(f"{label} timed out after {timeout_used}s")
@@ -196,8 +208,7 @@ class Shell:
         powershell_path: Optional[str] = None,
         working_directory: Optional[Union[str, Path]] = None,
         timeout_seconds: float = 5.0,
-        return_partial_output_on_timeout: bool = False,
-        enforce_internal_timeouts: bool = False,
+        auto_restart_on_timeout: bool = True,
         environment: Optional[Dict[str, str]] = None,
         initial_commands: Optional[List[str]] = None,
         set_UTF8: bool = True,
@@ -214,10 +225,8 @@ class Shell:
             Working directory for the child process. Resolved to an absolute path.
         timeout_seconds : float
             Default per-command timeout used when a method's `timeout` is not provided.
-        return_partial_output_on_timeout : bool
-            If True, commands that time out return whatever output was captured before the timeout.
-        enforce_internal_timeouts : bool
-            If True, all commands are wrapped inside a PowerShell `Start-Job` with a timeout.
+        auto_restart_on_timeout : bool
+            If True, the backend process is automatically restarted after a timeout.
         environment : Optional[Dict[str, str]]
             Extra environment variables for the child process.
         initial_commands : Optional[List[str]]
@@ -237,8 +246,7 @@ class Shell:
         if working_directory:
             cfg.working_directory = str(Path(working_directory).resolve())
         cfg.timeout_seconds = int(timeout_seconds or 0)
-        cfg.return_partial_output_on_timeout = bool(return_partial_output_on_timeout)
-        cfg.enforce_internal_timeouts = bool(enforce_internal_timeouts)
+        cfg.auto_restart_on_timeout = bool(auto_restart_on_timeout)
 
         if environment:
             # Copy to detach from caller's dict and avoid accidental mutation.
@@ -250,10 +258,31 @@ class Shell:
         if set_UTF8:
             cfg.initial_commands.insert(0, "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()")
 
-        self._cfg: _CPP_Config = cfg
-        self._core: _CPP_VirtualShell = mod.VirtualShell(cfg)
-        self._strip_results: bool = bool(strip_results)
+        module_dir = Path(__file__).resolve().parent
+        self._restore_script_path = module_dir / "get-session.ps1"
+        self._save_session_script_path = module_dir / "save-session.ps1"
+        self._python_run_id = secrets.token_hex(16)
+        session_dir = Path(tempfile.gettempdir()) / "virtualshell"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        self._session_path = session_dir / f"session_{self._python_run_id}.xml"
+        cfg.restore_script_path = str(self._restore_script_path)
+        cfg.session_snapshot_path = str(self._session_path)
+
+        self._cfg = cfg
+        self._core = mod.VirtualShell(cfg)
+        self._strip_results = bool(strip_results)
+        self._raise_on_timeout = not bool(auto_restart_on_timeout)
     
+    @property
+    def python_run_id(self) -> str:
+        """Return the random identifier used for this Python wrapper instance."""
+        return self._python_run_id
+
+    @property
+    def session_path(self) -> Path:
+        """Return the absolute path to the session snapshot XML file."""
+        return self._session_path
+
     def set_strip_results(self, v: bool) -> None:
         """Set whether to strip leading/trailing whitespace from `out` and `err`.
 
@@ -287,11 +316,25 @@ class Shell:
             self._core.stop(force)
         except Exception as e:  # Surface backend failures in a consistent type.
             raise VirtualShellError(f"Failed to stop PowerShell: {e}") from e
+        finally:
+            try:
+                if hasattr(self, "_session_path") and self._session_path.exists():
+                    self._session_path.unlink()
+            except OSError:
+                pass
 
     @property
     def is_running(self) -> bool:
         """Return True if the backend process is alive."""
         return bool(self._core.is_alive())
+
+    @property
+    def is_restarting(self) -> bool:
+        """Return True if the backend process is restarting."""
+        return bool(self._core.is_restarting())
+
+
+
 
     # -------- sync --------
     def run(
@@ -299,7 +342,6 @@ class Shell:
         command: str,
         timeout: Optional[float] = None,
         *,
-        return_partial_on_timeout: Optional[bool] = None,
         raise_on_error: bool = False,
         as_dataclass: bool = True,
     ) -> Union[ExecutionResult, _CPP_ExecResult]:
@@ -316,10 +358,10 @@ class Shell:
         as_dataclass : bool
             If True, return an `ExecutionResult`; otherwise return the raw C++ result.
         """
-        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
+        self._wait_if_restarting()
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
-        res: _CPP_ExecResult = self._core.execute(command=command, timeout_seconds=to, return_partial_on_timeout=ret_partial)
-        _raise_on_failure(res, raise_on_error=raise_on_error, label="Command", timeout_used=to)
+        res: _CPP_ExecResult = self._core.execute(command=command, timeout_seconds=to)
+        _raise_on_failure(res, raise_on_error=raise_on_error, raise_on_timeout=self._raise_on_timeout, label="Command", timeout_used=to)
         return ExecutionResult.from_cpp(res) if as_dataclass else res
 
     def run_script(
@@ -328,7 +370,6 @@ class Shell:
         args: Optional[Iterable[str]] = None,
         timeout: Optional[float] = None,
         *,
-        return_partial_on_timeout: Optional[bool] = None,
         dot_source: bool = False,
         raise_on_error: bool = False,
         as_dataclass: bool = True,
@@ -341,17 +382,16 @@ class Shell:
         - `raise_on_error` only affects Python-side exception raising; the backend
           always runs with `raise_on_error=False` to avoid double-throwing.
         """
-        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
+        self._wait_if_restarting()
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
         res: _CPP_ExecResult = self._core.execute_script(
             script_path=str(Path(script_path).resolve()),
             args=list(args or []),
             timeout_seconds=to,
-            return_partial_on_timeout=ret_partial,
             dot_source=bool(dot_source),
             raise_on_error=False,
         )
-        _raise_on_failure(res, raise_on_error=raise_on_error, label="Script", timeout_used=to)
+        _raise_on_failure(res, raise_on_error=raise_on_error, raise_on_timeout=self._raise_on_timeout, label="Script", timeout_used=to)
         return ExecutionResult.from_cpp(res) if as_dataclass else res
 
     def run_script_kv(
@@ -360,7 +400,6 @@ class Shell:
         named_args: Optional[Dict[str, str]] = None,
         timeout: Optional[float] = None,
         *,
-        return_partial_on_timeout: Optional[bool] = None,
         dot_source: bool = False,
         raise_on_error: bool = False,
         as_dataclass: bool = True,
@@ -370,17 +409,16 @@ class Shell:
         `named_args` is copied to detach from caller mutations. Keys/values must be
         strings representable in the PowerShell context (caller ensures quoting).
         """
-        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
+        self._wait_if_restarting()
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
         res: _CPP_ExecResult = self._core.execute_script_kv(
             script_path=str(Path(script_path).resolve()),
             named_args=dict(named_args or {}),
             timeout_seconds=to,
-            return_partial_on_timeout=ret_partial,
             dot_source=bool(dot_source),
             raise_on_error=False,
         )
-        _raise_on_failure(res, raise_on_error=raise_on_error, label="ScriptKV", timeout_used=to)
+        _raise_on_failure(res, raise_on_error=raise_on_error, raise_on_timeout=self._raise_on_timeout, label="ScriptKV", timeout_used=to)
         return ExecutionResult.from_cpp(res) if as_dataclass else res
 
     def run_batch(
@@ -388,7 +426,6 @@ class Shell:
         commands: Iterable[str],
         *,
         per_command_timeout: Optional[float] = None,
-        return_partial_on_timeout: Optional[bool] = None,
         as_dataclass: bool = True,
     ) -> List[Union[ExecutionResult, _CPP_ExecResult]]:
         """Execute multiple commands sequentially in the same session.
@@ -396,12 +433,11 @@ class Shell:
         - `per_command_timeout` applies to each individual command.
         - Returns a list of results preserving the order of input commands.
         """
-        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
+        self._wait_if_restarting()
         to = _effective_timeout(per_command_timeout, self._cfg.timeout_seconds)
         vec = self._core.execute_batch(
             commands=list(commands),
             timeout_seconds=to,
-            return_partial_on_timeout=ret_partial,
         )
         if as_dataclass:
             return [ExecutionResult.from_cpp(r) for r in vec]
@@ -412,7 +448,6 @@ class Shell:
                   callback: Optional[Callable[[ExecutionResult], None]] = None,
                   timeout: Optional[float] = None,
                   *, 
-                  return_partial_on_timeout: Optional[bool] = None,
                   as_dataclass: bool = True):
         """Asynchronously execute a single command.
 
@@ -422,6 +457,7 @@ class Shell:
           the returned future is a mapped proxy that yields `ExecutionResult`.
         - Exceptions in your callback are swallowed to avoid breaking the executor.
         """
+        self._wait_if_restarting()
 
         def _cb(py_res: _CPP_ExecResult) -> None:
             if callback is None:
@@ -431,9 +467,8 @@ class Shell:
             except Exception:
                 # Intentionally ignore to keep the executor stable.
                 pass
-        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
-        c_fut = self._core.execute_async(command=command, callback=_cb if callback else None, timeout_seconds=to, return_partial_on_timeout=ret_partial)
+        c_fut = self._core.execute_async(command=command, callback=_cb if callback else None, timeout_seconds=to)
         return _map_future(c_fut, lambda r: ExecutionResult.from_cpp(r)) if as_dataclass else c_fut
 
     def run_async_batch(
@@ -442,7 +477,6 @@ class Shell:
         progress: Optional[Callable[[ _CPP_BatchProg ], None]] = None,
         *,
         per_command_timeout: Optional[float] = None,
-        return_partial_on_timeout: Optional[bool] = None,
         stop_on_first_error: bool = True,
         as_dataclass: bool = True,
     ):
@@ -452,14 +486,13 @@ class Shell:
         - Returns a Future resolving to a list of results. Mapping to `ExecutionResult`
           is applied if `as_dataclass` is True.
         """
-        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
+        self._wait_if_restarting()
         to = _effective_timeout(per_command_timeout, self._cfg.timeout_seconds)
         fut = self._core.execute_async_batch(
             commands=list(commands),
             progress_callback=progress if progress else None,
             stop_on_first_error=bool(stop_on_first_error),
             per_command_timeout_seconds=to,
-            return_partial_on_timeout=ret_partial,
         )
         if as_dataclass:
             return _map_future(fut, lambda vec: [ExecutionResult.from_cpp(r) for r in vec])
@@ -472,7 +505,6 @@ class Shell:
         callback: Optional[Callable[[ExecutionResult], None]] = None,
         *,
         timeout: Optional[float] = None,
-        return_partial_on_timeout: Optional[bool] = None,
         dot_source: bool = False,
         as_dataclass: bool = True,
     ):
@@ -482,6 +514,7 @@ class Shell:
           the callback are suppressed to protect the executor.
         - Returns a Future that yields either the raw C++ result or `ExecutionResult`.
         """
+        self._wait_if_restarting()
         def _cb(py_res: _CPP_ExecResult) -> None:
             if callback is None:
                 return
@@ -489,14 +522,12 @@ class Shell:
                 callback(ExecutionResult.from_cpp(py_res) if as_dataclass else py_res)
             except Exception:
                 pass
-        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
         fut = self._core.execute_async_script(
             script_path=str(Path(script_path).resolve()),
             args=list(args or []),
             callback=_cb if callback else None,
             timeout_seconds=to,
-            return_partial_on_timeout=ret_partial,
             dot_source=bool(dot_source),
             raise_on_error=False,
         )
@@ -511,7 +542,6 @@ class Shell:
         callback: Optional[Callable[[ExecutionResult], None]] = None,
         *,
         timeout: Optional[float] = None,
-        return_partial_on_timeout: Optional[bool] = None,
         dot_source: bool = False,
         as_dataclass: bool = True,
     ):
@@ -520,13 +550,12 @@ class Shell:
         If `callback` is provided, it is wired to the returned Future using
         `add_done_callback` and receives the mapped result when available.
         """
-        ret_partial: int = (return_partial_on_timeout if return_partial_on_timeout is not None else -1)
+        self._wait_if_restarting()
         to = _effective_timeout(timeout, self._cfg.timeout_seconds)
         fut = self._core.execute_async_script_kv(
             script_path=str(Path(script_path).resolve()),
             named_args=dict(named_args or {}),
             timeout_seconds=to,
-            return_partial_on_timeout=ret_partial,
             dot_source=bool(dot_source),
             raise_on_error=False,
         )
@@ -548,6 +577,23 @@ class Shell:
         return fut
 
     # -------- convenience --------
+    def save_session(
+        self,
+        timeout: Optional[float] = None,
+        *,
+        raise_on_error: bool = True,
+        as_dataclass: bool = True,
+    ) -> Union[ExecutionResult, _CPP_ExecResult]:
+        """Persist the current session state via the bundled save-session.ps1."""
+        return self.run_script(
+            self._save_session_script_path,
+            args=[str(self._session_path)],
+            timeout=timeout,
+            dot_source=False,
+            raise_on_error=raise_on_error,
+            as_dataclass=as_dataclass,
+        )
+
     def pwsh(self, s: str, timeout: Optional[float] = None, raise_on_error: bool = False) -> ExecutionResult:
         """Execute a **literal** PowerShell string safely.
 
@@ -563,7 +609,21 @@ class Shell:
             self.start()
         return self
 
+    def __repr__(self) -> str:
+        return f"<Shell running={int(self.is_running)}>"
+
     def __exit__(self, exc_type, exc, tb) -> None:
         """Context manager exit: stop backend regardless of errors in the block."""
         self.stop()
         return None
+    
+    def _wait_if_restarting(self, poll_interval: float = 0.1) -> None:
+        """Block if the backend process has restarted.
+
+        - Only relevant if `auto_restart_on_timeout=True`.
+        - Polls `is_restarting` every `poll_interval` seconds.
+        - Use with care: this is a blocking call that may wait indefinitely.
+        """
+        while self.is_restarting:
+            time.sleep(poll_interval)
+        return

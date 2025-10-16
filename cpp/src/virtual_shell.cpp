@@ -203,8 +203,6 @@ VirtualShell& VirtualShell::operator=(VirtualShell&& other) noexcept {
 bool VirtualShell::start() {
     if (isRunning_) return false; // Already running; do not re-spawn a second process instance.
 
-    shouldStop.store(false, std::memory_order_release);
-
     if (!createPipes()) {
         return false; // Pipe setup failed; cannot attach stdio to child.
     }
@@ -331,19 +329,45 @@ bool VirtualShell::start() {
 
     (void)this->execute("$null | Out-Null", /*timeoutSeconds=*/5.0);
     (void)sendInitialCommands(); // Optional user/preset initialization; ignore failures.
-    if (config.enforceInternalTimeouts) {
-        auto fut_init = this->submit(pwshTimeoutWrapper, /*timeoutSeconds=*/30.0, /*retPartial*/0, /*cb*/{});
-        auto res_init = fut_init.get();
-        if (!res_init.success) {
-            VSHELL_DBG("INIT", "Invoke-WithTimeout install failed: err='%s'", res_init.err.c_str());
-            this->stop(true);
-            throw std::runtime_error("Failed to install Invoke-WithTimeout");
-        }
+    if (!config.restoreScriptPath.empty() && !config.sessionSnapshotPath.empty()) {
+        VSHELL_DBG("LIFECYCLE",
+                   "restore check restore='%s' snapshot='%s'",
+                   config.restoreScriptPath.c_str(),
+                   config.sessionSnapshotPath.c_str());
+        try {
+            fs::path snapshot = fs::u8path(config.sessionSnapshotPath);
+            const bool hasSnapshot = fs::exists(snapshot);
+            VSHELL_DBG("LIFECYCLE", "restore snapshot exists=%d", int(hasSnapshot));
+            if (hasSnapshot) {
+                fs::path restore = fs::u8path(config.restoreScriptPath);
+                std::string restore_u8 = restore.u8string();
+                std::string snapshot_u8 = snapshot.u8string();
+                std::string command;
+                command.reserve(restore_u8.size() + snapshot_u8.size() + 32);
+                command += ". ";
+                command += ps_quote(restore_u8);
+                command += " -Path ";
+                command += ps_quote(snapshot_u8);
 
-        auto chk = this->submit("if (Test-Path function:Invoke-WithTimeout){'OK'}else{'NO'}", 5.0, 0, {}).get();
-        VSHELL_DBG("INIT", "Invoke-WithTimeout present: %s", (chk.out.find("OK")!=std::string::npos ? "yes" : "no"));
-        isTimeoutWrapperCreated_ = true;
+                double restoreTimeout = config.timeoutSeconds > 0 ? static_cast<double>(config.timeoutSeconds)
+                                                                  : 5.0;
+                auto fut = this->submit(command, restoreTimeout, nullptr, /*bypassRestart=*/true);
+                auto restoreResult = fut.get();
+                if (!restoreResult.success) {
+                    VSHELL_DBG("LIFECYCLE", "session restore failed exit=%d err='%s'",
+                               restoreResult.exitCode,
+                               restoreResult.err.c_str());
+                } else {
+                    VSHELL_DBG("LIFECYCLE", "session restore succeeded");
+                }
+            }
+        } catch (const std::exception& ex) {
+            VSHELL_DBG("LIFECYCLE", "session restore threw exception: %s", ex.what());
+        } catch (...) {
+            VSHELL_DBG("LIFECYCLE", "session restore threw unknown exception");
+        }
     }
+    isRestarting_.store(false, std::memory_order_release);
 
     return true;
 }
@@ -352,11 +376,11 @@ void VirtualShell::stop(bool force) {
     std::unique_lock<std::mutex> stopLock(stopMx_);
     // Fast exit if process not running
     if (!isRunning_) {
-        shouldStop.store(false, std::memory_order_release);
+        lifecycleGate_.store(false, std::memory_order_release);
         return; // Idempotent: safe if stop() is called multiple times.
     }
 
-    shouldStop.store(true, std::memory_order_release);
+    lifecycleGate_.store(true, std::memory_order_release);
 
     VSHELL_DBG("LIFECYCLE", "stop(force=%d)", int(force));
 
@@ -461,7 +485,7 @@ void VirtualShell::stop(bool force) {
     processId = -1; // Mark as no longer valid. FDs already closed above.
 #endif
 
-    shouldStop.store(false, std::memory_order_release);
+    lifecycleGate_.store(false, std::memory_order_release);
 }
 
 bool VirtualShell::isAlive() const {
@@ -492,9 +516,9 @@ bool VirtualShell::isAlive() const {
 
 
 VirtualShell::ExecutionResult
-VirtualShell::execute(const std::string& command, double timeoutSeconds, int retPartialOnTimeout)
+VirtualShell::execute(const std::string& command, double timeoutSeconds)
 {
-    auto fut = submit(command, timeoutSeconds, retPartialOnTimeout, nullptr);
+    auto fut = submit(command, timeoutSeconds, nullptr);
     const double to = (timeoutSeconds>0?timeoutSeconds:config.timeoutSeconds); // Per-call override, else default.
 
     // Wait up to 'to' seconds for completion; do not block indefinitely.
@@ -510,16 +534,15 @@ VirtualShell::execute(const std::string& command, double timeoutSeconds, int ret
 
 std::future<VirtualShell::ExecutionResult>
 VirtualShell::executeAsync(std::string command,
-                           std::function<void(const ExecutionResult&)> callback, double timeoutSeconds, int retPartialOnTimeout)
+                           std::function<void(const ExecutionResult&)> callback, double timeoutSeconds)
 {
-    return submit(std::move(command), timeoutSeconds, retPartialOnTimeout, std::move(callback));
+    return submit(std::move(command), timeoutSeconds, std::move(callback));
 }
 
 VirtualShell::ExecutionResult VirtualShell::execute_script(
     const std::string& scriptPath,
     const std::vector<std::string>& args,
     double timeoutSeconds,
-    int retPartialOnTimeout,
     bool dotSource,
     bool /*raiseOnError*/)
 {
@@ -559,14 +582,13 @@ VirtualShell::ExecutionResult VirtualShell::execute_script(
     command += "$__args__ = " + argArray + ";\n";
     command += prefix + ps_quote(abs_u8) + " @__args__";
 
-    return execute(command, timeoutSeconds, retPartialOnTimeout);
+    return execute(command, timeoutSeconds);
 }
 
 std::future<VirtualShell::ExecutionResult>
 VirtualShell::executeAsync_script(std::string scriptPath,
                                   std::vector<std::string> args,
                                   double timeoutSeconds,
-                                  int retPartialOnTimeout,
                                   bool dotSource,
                                   bool /*raiseOnError*/,
                                   std::function<void(const ExecutionResult&)> callback)
@@ -619,12 +641,12 @@ VirtualShell::executeAsync_script(std::string scriptPath,
     command += prefix + ps_quote(abs_u8) + " @__args__";
 
     // Hand off to the async I/O engine; callback fires when the parser completes the command.
-    return submit(std::move(command), timeoutSeconds, retPartialOnTimeout, std::move(callback));
+    return submit(std::move(command), timeoutSeconds, std::move(callback));
 }
 
 
 VirtualShell::ExecutionResult VirtualShell::execute_batch(
-    const std::vector<std::string>& commands, double timeoutSeconds, int retPartialOnTimeout)
+    const std::vector<std::string>& commands, double timeoutSeconds)
 {
     // Pre-size buffer for single write to the child (reduces syscalls/copies).
     size_t cap = 0;
@@ -639,15 +661,14 @@ VirtualShell::ExecutionResult VirtualShell::execute_batch(
             joined.push_back('\n');
         }
     }
-    return execute(joined, timeoutSeconds, retPartialOnTimeout);
+    return execute(joined, timeoutSeconds);
 }
 
 std::future<std::vector<VirtualShell::ExecutionResult>>
 VirtualShell::executeAsync_batch(std::vector<std::string> commands,
                                  std::function<void(const BatchProgress&)> progressCallback,
                                  bool stopOnFirstError,
-                                 double perCommandTimeoutSeconds /* = 0.0 */,
-                                 int retPartialOnTimeout /* = -1 */)
+                                 double perCommandTimeoutSeconds /* = 0.0 */)
 {
     // Promise/Future returned to the caller
     auto prom = std::make_shared<std::promise<std::vector<ExecutionResult>>>();
@@ -661,7 +682,6 @@ VirtualShell::executeAsync_batch(std::vector<std::string> commands,
                  progressCallback = std::move(progressCallback),
                  stopOnFirstError,
                  perCommandTimeoutSeconds,
-                 retPartialOnTimeout,
                  p = std::move(prom)]() mutable
     {
         BatchProgress prog{};
@@ -685,7 +705,6 @@ VirtualShell::executeAsync_batch(std::vector<std::string> commands,
             // Submit single command (moves cmd to avoid copy)
             auto futOne = self->submit(std::move(cmd),
                                        perCommandTimeoutSeconds,
-                                       retPartialOnTimeout,
                                        /*cb=*/nullptr);
 
             ExecutionResult r{};
@@ -731,7 +750,6 @@ VirtualShell::ExecutionResult VirtualShell::execute_script_kv(
     const std::string& scriptPath,
     const std::map<std::string, std::string>& namedArgs,
     double timeoutSeconds,
-    int retPartialOnTimeout,
     bool dotSource, bool /*raiseOnError*/)
 {
     namespace fs = std::filesystem;
@@ -765,14 +783,13 @@ VirtualShell::ExecutionResult VirtualShell::execute_script_kv(
     command.reserve(abs_u8.size() + mapStr.size() + 64);
     command += "$__params__ = " + mapStr + ";\n";
     command += prefix + ps_quote(abs_u8) + " @__params__";
-    return execute(command, timeoutSeconds, retPartialOnTimeout);
+    return execute(command, timeoutSeconds);
 }
 
 std::future<VirtualShell::ExecutionResult>
 VirtualShell::executeAsync_script_kv(std::string scriptPath,
                                      std::map<std::string, std::string> namedArgs,
                                      double timeoutSeconds,
-                                     int retPartialOnTimeout,
                                      bool dotSource,
                                      bool /*raiseOnError*/)
 {
@@ -827,7 +844,7 @@ VirtualShell::executeAsync_script_kv(std::string scriptPath,
     command += prefix + ps_quote(abs_u8) + " @__params__";
 
     // Route through the async I/O engine; no per-command callback for the KV variant.
-    return submit(std::move(command), timeoutSeconds, retPartialOnTimeout, /*cb=*/nullptr);
+    return submit(std::move(command), timeoutSeconds, /*cb=*/nullptr);
 }
 
 bool VirtualShell::sendInput(const std::string& input) {
@@ -1485,37 +1502,13 @@ std::string VirtualShell::build_pwsh_packet(uint64_t id, std::string_view cmd) {
     return full;
 }
 
-std::string VirtualShell::wrap_with_internal_timeout(std::string_view cmd, double timeoutSec) {
-    std::string s;
-    s.reserve(cmd.size() + 256);
-    s += "$__vs_cmd = [ScriptBlock]::Create(@'\n";
-    s.append(cmd.begin(), cmd.end());
-    if (s.empty() || s.back() != '\n') s.push_back('\n');
-    s += "'@)\n";
-    s += "try { Invoke-WithTimeout -Script $__vs_cmd -TimeoutSec " + std::to_string((int)timeoutSec) + " }\n";
-    s += "catch {\n";
-    s += "    if ($_.Exception -is [System.TimeoutException]) {\n";
-    s += "        [Console]::Error.WriteLine('" + std::string(INTERNAL_TIMEOUT_SENTINEL) + "')\n";
-    s += "        if ($_.Exception.Message) {\n";
-    s += "            [Console]::Error.WriteLine($_.Exception.Message)\n";
-    s += "        } else {\n";
-    s += "            [Console]::Error.WriteLine('timeout')\n";
-    s += "        }\n";
-    s += "    } else {\n";
-    s += "        [Console]::Error.WriteLine($_.Exception.Message)\n";
-    s += "    }\n";
-    s += "}\n";
-    return s;
-}
-
-
 std::future<VirtualShell::ExecutionResult>
-VirtualShell::submit(std::string command, double timeoutSeconds, int retPartialOnTimeout,
-                     std::function<void(const ExecutionResult&)> cb)
+VirtualShell::submit(std::string command, double timeoutSeconds,
+                     std::function<void(const ExecutionResult&)> cb, bool bypassRestart)
 {
-    if (shouldStop.load(std::memory_order_acquire)) {
+    if (lifecycleGate_.load(std::memory_order_acquire) && !bypassRestart) {
         std::promise<ExecutionResult> p; ExecutionResult r{};
-        r.err = "PowerShell process is stopping";
+        r.err = "PowerShell process is restarting";
         r.exitCode = -2;
         r.success = false;
         p.set_value(std::move(r));
@@ -1533,9 +1526,7 @@ VirtualShell::submit(std::string command, double timeoutSeconds, int retPartialO
     }
     
 
-    bool retTimeout = (retPartialOnTimeout < 0)
-            ? config.returnPartialOutputOnTimeout
-            : (retPartialOnTimeout != 0);
+
 
     // Monotonic sequence for correlating output to this request.
     const uint64_t id = ++seq_;
@@ -1550,23 +1541,13 @@ VirtualShell::submit(std::string command, double timeoutSeconds, int retPartialO
     S->endMarker = "<<<SS_END_" + std::to_string(id) + ">>>";
     S->timeoutSec = (timeoutSeconds > 0 ? timeoutSeconds : config.timeoutSeconds);
     S->cb = std::move(cb);
-    S->retPartialOnTimeout = retTimeout;
     if (S->timeoutSec > 0.0) {
-        if (config.enforceInternalTimeouts && isTimeoutWrapperCreated_) {
-             S->tDeadline = S->tStart + std::chrono::milliseconds((long)((S->timeoutSec + 0.5) * 1000));
-        } else {
-            auto delta = std::chrono::duration<double>(S->timeoutSec);
-            S->tDeadline = S->tStart + std::chrono::duration_cast<clock::duration>(delta);
-        }
+        auto delta = std::chrono::duration<double>(S->timeoutSec);
+        S->tDeadline = S->tStart + std::chrono::duration_cast<clock::duration>(delta);
     } else {
         S->tDeadline = clock::time_point::max();
     }
     
-    VSHELL_DBG("SUBMIT", "id=%llu cmd='%s' timeout=%.3f returnPartial=%d",
-           (unsigned long long)id, command.c_str(), S->timeoutSec, int(retTimeout));
-
-    const double effectiveTimeout = S->timeoutSec;
-
     auto fut = S->prom.get_future();
     {
         // Register in-flight command before enqueueing write, so readers can demux immediately.
@@ -1583,12 +1564,6 @@ VirtualShell::submit(std::string command, double timeoutSeconds, int retPartialO
     }
 
     std::string cmd = std::move(command);
-    if (config.enforceInternalTimeouts && isTimeoutWrapperCreated_ && effectiveTimeout > 0.0) {
-        VSHELL_DBG("SUBMIT", " id=%llu wrapped with internal timeout %.3f sec",
-            (unsigned long long)id, effectiveTimeout);
-        cmd = wrap_with_internal_timeout(cmd, effectiveTimeout);
-    }
-
     {
         // Enqueue packetized command for the writer thread.
         std::lock_guard<std::mutex> lk(writeMx_);
@@ -1799,10 +1774,8 @@ void VirtualShell::completeCmdLocked_(CmdState& S, bool success) {
 void VirtualShell::fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSentinel) {
     if (!st) return;
 
-    VSHELL_DBG("TIMEOUT", "id=%llu retPartial=%d out_so_far=%zu internal=%d",
+    VSHELL_DBG("TIMEOUT", "id=%llu internal=%d",
                static_cast<unsigned long long>(st->id),
-               int(st->retPartialOnTimeout.load()),
-               st->outBuf.size(),
                expectSentinel ? 0 : 1);
 
     if (expectSentinel) {
@@ -1815,29 +1788,28 @@ void VirtualShell::fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSent
     r.success  = false;
     r.exitCode = -1;
     r.err = st->errBuf.empty() ? std::string("timeout") : std::move(st->errBuf);
-    if (st->retPartialOnTimeout) {
-        r.out = std::move(st->outBuf);
+
+    if (config.autoRestartOnTimeout) {
+        VSHELL_DBG("TIMEOUT", "id=%llu scheduling forced restart", static_cast<unsigned long long>(st->id));
+        requestRestartAsync_(true);
+        isRestarting_.store(true, std::memory_order_release);
     }
 
     st->done.store(true);
 
     try { st->prom.set_value(r); } catch (...) {}
     if (st->cb) { try { st->cb(r); } catch (...) {} }
-
-    if (!config.enforceInternalTimeouts) {
-        VSHELL_DBG("TIMEOUT", "id=%llu scheduling forced stop", static_cast<unsigned long long>(st->id));
-        requestStopAsync_(true);
-    }
 }
 
-void VirtualShell::requestStopAsync_(bool force) {
-    auto weak = weak_from_this();
+void VirtualShell::requestRestartAsync_(bool force) {
+    auto weak = this->weak_from_this();
     if (weak.expired()) {
         return;
     }
 
     bool expected = false;
-    if (!shouldStop.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    if (!lifecycleGate_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        VSHELL_DBG("TIMEOUT", "restart already pending");
         return;
     }
 
@@ -1845,11 +1817,22 @@ void VirtualShell::requestStopAsync_(bool force) {
         std::thread([weak = std::move(weak), force]() mutable {
             if (auto self = weak.lock()) {
                 self->stop(force);
+                self->lifecycleGate_.store(true, std::memory_order_release);
+                bool restarted = false;
+                try {
+                    restarted = self->start();
+                } catch (...) {
+                    VSHELL_DBG("TIMEOUT", "restart start() threw");
+                }
+                if (!restarted) {
+                    VSHELL_DBG("TIMEOUT", "restart start() failed");
+                }
+                self->lifecycleGate_.store(false, std::memory_order_release);
             }
         }).detach();
     } catch (...) {
-        shouldStop.store(false, std::memory_order_release);
-        VSHELL_DBG("TIMEOUT", "failed to spawn stop thread");
+        lifecycleGate_.store(false, std::memory_order_release);
+        VSHELL_DBG("TIMEOUT", "failed to spawn restart thread");
     }
 }
 

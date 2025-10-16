@@ -129,62 +129,6 @@ static std::string read_overlapped_once(OverlappedPipe& P, bool blocking) {
 
 static constexpr std::string_view INTERNAL_TIMEOUT_SENTINEL = "__VS_INTERNAL_TIMEOUT__";
 
-static const std::string pwshTimeoutWrapper = R"PS(
-$__vs_useThreadJob = $false
-try {
-    if (-not (Get-Module -Name ThreadJob -ErrorAction SilentlyContinue)) {
-        Import-Module -Name ThreadJob -ErrorAction SilentlyContinue | Out-Null
-    }
-    if (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) {
-        $__vs_useThreadJob = $true
-    }
-} catch {
-    $__vs_useThreadJob = $false
-}
-
-if ($__vs_useThreadJob) {
-    $__vs_invokeWithTimeoutBody = @'
-param(
-    [scriptblock]$Script,
-    [int]$TimeoutSec = 5
-)
-if ($TimeoutSec -le 0) { & $Script; return }
-$job = Start-ThreadJob -ScriptBlock $Script
-try {
-    if (Wait-Job -Id $job.Id -Timeout $TimeoutSec) {
-        Receive-Job -Id $job.Id -ErrorAction Stop
-    } else {
-        Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-        throw [System.TimeoutException]::new("Command timed out after $TimeoutSec seconds")
-    }
-} finally {
-    Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-}
-'@
-} else {
-    $__vs_invokeWithTimeoutBody = @'
-param(
-    [scriptblock]$Script,
-    [int]$TimeoutSec = 5
-)
-if ($TimeoutSec -le 0) { & $Script; return }
-$job = Start-Job -ScriptBlock $Script
-try {
-    if (Wait-Job -Id $job.Id -Timeout $TimeoutSec) {
-        Receive-Job -Id $job.Id -ErrorAction Stop
-    } else {
-        Stop-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-        throw [System.TimeoutException]::new("Command timed out after $TimeoutSec seconds")
-    }
-} finally {
-    Remove-Job -Id $job.Id -Force -ErrorAction SilentlyContinue
-}
-'@
-}
-
-Set-Item -Path function:Invoke-WithTimeout -Value ([ScriptBlock]::Create($__vs_invokeWithTimeoutBody))
-)PS";
-
 static inline void trim_inplace(std::string& s) {
     // Remove leading/trailing whitespace (space, tab, CR, LF) in-place.
     auto is_space = [](unsigned char ch){ return ch==' '||ch=='\t'||ch=='\r'||ch=='\n'; };

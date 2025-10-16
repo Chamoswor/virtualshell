@@ -3,12 +3,12 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .shell import ExecutionResult, Shell
+    from .shell import ExecutionResult, Shell, ExitCode
 
 try:
     from ._version import version as __version__
 except Exception:
-    __version__ = "1.0.1"
+    __version__ = "1.0.3"
 
 
 from .errors import (
@@ -21,11 +21,11 @@ from .errors import (
 __all__ = [
     "VirtualShellError", "PowerShellNotFoundError",
     "ExecutionTimeoutError", "ExecutionError",
-    "__version__", "Shell", "ExecutionResult",
+    "__version__", "Shell", "ExecutionResult", "ExitCode",
 ]
 
 def __getattr__(name: str):
-    if name in {"Shell", "ExecutionResult"}:
+    if name in {"Shell", "ExecutionResult", "ExitCode"}:
         mod = import_module(".shell", __name__)
         obj = getattr(mod, name)
         globals()[name] = obj
