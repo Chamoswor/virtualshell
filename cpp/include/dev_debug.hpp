@@ -23,8 +23,8 @@
 // VIRTUALSHELL_DEBUG=1
 // VIRTUALSHELL_DEBUG_PATH=C:\temp\vshell.log
 
-namespace VirtualShellDebug {
-
+namespace virtualshell {
+namespace dev {
 // Thread-safe, lightweight file logger (lazy-open).
 class Logger {
 public:
@@ -132,12 +132,7 @@ private:
     std::FILE* fh_{nullptr};
 };
 
-// Convenience macro (keeps callsites short)
-#define VSHELL_DBG(TAG, FMT, ...) \
-    do { if (VirtualShellDebug::Logger::instance().enabled()) \
-        VirtualShellDebug::Logger::instance().logf(TAG, FMT, ##__VA_ARGS__); } while(0)
-
-} // namespace VirtualShellDebug
+}} // namespace virtualshell::dev
 
 #if defined(_WIN32) && defined(__clang__)
   #pragma clang diagnostic pop

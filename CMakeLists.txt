@@ -23,6 +23,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(SRC
   cpp/src/binder.cpp
+  cpp/src/io_pump.cpp
+  cpp/src/powershell_process.cpp
   cpp/src/virtual_shell.cpp
 )
 

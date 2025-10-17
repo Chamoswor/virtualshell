@@ -1,5 +1,5 @@
 #pragma once
-#
+
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,39 +18,19 @@
 #include <future>
 #include <unordered_map>
 
-#define READ_BUFFER_SIZE (64 * 1024) // 64 KB buffer for reading output, used in readOutput() and readError()
+#include "io_pump.hpp"
+#include "execution_result.hpp"
+#include "cmd_state.hpp"
+#include "timeout_watcher.hpp"
+#include "config.hpp"
+
+namespace virtualshell {
+namespace core {
+class PowerShellProcess;
+}
+}
+
 #define INITIAL_COMMANDS_BUF_SIZE (8 * 1024) // 8 KB buffer for initial commands, used in sendInitialCommands()
-
-#ifdef _WIN32
-    #include <io.h>
-    #include <fcntl.h>
-    #include <windows.h>
-
-    // Non-owning wrapper for an overlapped pipe handle with a reusable buffer.
-    struct OverlappedPipe {
-        HANDLE      h{INVALID_HANDLE_VALUE};
-        OVERLAPPED  ov{};
-        bool        pending{false};
-        std::vector<char> buf;
-        OverlappedPipe() {
-            ZeroMemory(&ov, sizeof(ov));
-            ov.hEvent = ::CreateEvent(nullptr, /*manualReset*/ TRUE, /*initialState*/ FALSE, nullptr);
-            buf.resize(64 * 1024); // adjust if needed
-        }
-        ~OverlappedPipe() {
-            if (ov.hEvent) ::CloseHandle(ov.hEvent);
-        }
-    };
-    
-#else
-    #include <unistd.h>
-    #include <sys/wait.h>
-    #include <signal.h>
-    #include <fcntl.h>
-    #include <poll.h>
-    #include <sys/types.h>
-    #include <errno.h>
-#endif
 
 /**
  * @brief Headless PowerShell 7 process host.
@@ -62,85 +42,13 @@ class VirtualShell : public std::enable_shared_from_this<VirtualShell> {
     static std::string build_pwsh_packet(uint64_t id, std::string_view cmd);
 public:
     struct OutChunk { bool isErr; std::string data; };
-
-    /**
-     * @brief Result of a PowerShell command.
-     */
-    struct ExecutionResult {
-        std::string out;        ///< Stdout from the command
-        std::string err;        ///< Stderr from the command
-        int         exitCode;      ///< Exit code (0 = success)
-        bool        success;       ///< Whether the command completed successfully
-        double      executionTime; ///< Execution time in seconds
-    };
-
-    /**
-     * @brief Progress callback payload for batch executions.
-     */
-    struct BatchProgress {
-        size_t currentCommand;                 ///< Index of the current command in the batch
-        size_t totalCommands;                  ///< Total number of commands in the batch
-        ExecutionResult lastResult;            ///< Result of the most recently completed command
-        bool isComplete;                       ///< True when the batch has finished
-        std::vector<ExecutionResult> allResults; ///< Results for all commands (filled at completion)
-    };
-
-    /**
-     * @brief Configuration for the PowerShell process.
-     */
-    struct Config {
-        std::string powershellPath = "pwsh";      ///< Path to the PowerShell executable
-        std::string workingDirectory = "";        ///< Working directory (empty = current directory)
-        bool captureOutput = true;                ///< Capture stdout
-        bool captureError  = true;                ///< Capture stderr
-        bool autoRestartOnTimeout = true;            ///< If true, restart the process on command timeout
-        int  timeoutSeconds = 30;                 ///< Default per-command timeout (seconds)
-        std::map<std::string, std::string> environment;   ///< Extra environment variables
-        std::vector<std::string> initialCommands;         ///< Commands to run right after startup
-        std::string restoreScriptPath = "";       ///< Optional path to get-session.ps1
-        std::string sessionSnapshotPath = "";     ///< Optional path to session_{RUN-ID}.xml
-    };
-
-    /**
-     * @brief Internal state for a single in-flight command.
-     */
-    struct CmdState {
-        uint64_t                           id;          ///< Unique command identifier
-        std::promise<ExecutionResult>      prom;        ///< Promise to deliver the command result
-        std::string                        outBuf;      ///< Accumulated stdout buffer
-        std::string                        errBuf;      ///< Accumulated stderr buffer
-        std::string                        beginMarker; ///< Unique begin marker (e.g. "\x1ESS_BEG_123\x1E")
-        std::string                        endMarker;   ///< Unique marker string (e.g. "\x1ESS_END_123\x1E")
-        std::atomic<bool>                  begun{false};///< True once begin marker has been seen
-        std::string                        preBuf;      ///< Buffer for data before begin marker
-        std::atomic<bool>                  done{false}; ///< True once command is completed
-        std::atomic<bool>                  timedOut{false}; ///< True if command exceeded timeout
-        double                             startMonotonic{}; ///< Start time in monotonic seconds
-        double                             timeoutSec{}; ///< Timeout in seconds for this command
-        std::function<void(const ExecutionResult&)> cb;  ///< Optional callback for completion
-        std::chrono::steady_clock::time_point tStart{};   ///< Start timestamp
-        std::chrono::steady_clock::time_point tDeadline{};///< Absolute deadline for timeout
-    };
-
+    using CmdState = virtualshell::core::CmdState;
+    using ExecutionResult = virtualshell::core::ExecutionResult;
+    using BatchProgress = virtualshell::core::BatchProgress;
+    using TimeoutWatcher = virtualshell::core::TimeoutWatcher;
+    using Config = virtualshell::core::Config;
 private:
-#ifdef _WIN32
-    HANDLE hInputWrite = NULL;   ///< Write end of stdin pipe
-    HANDLE hInputRead  = NULL;   ///< Read end of stdin pipe
-    HANDLE hOutputWrite = NULL;  ///< Write end of stdout pipe
-    HANDLE hOutputRead  = NULL;  ///< Read end of stdout pipe
-    HANDLE hErrorWrite  = NULL;  ///< Write end of stderr pipe
-    HANDLE hErrorRead   = NULL;  ///< Read end of stderr pipe
-    HANDLE hProcess     = NULL;  ///< Process handle
-    HANDLE hThread      = NULL;  ///< Primary thread handle
-    PROCESS_INFORMATION processInfo = {}; ///< Process metadata
-    OverlappedPipe outPipe_; ///< Overlapped pipe for stdout
-    OverlappedPipe errPipe_; ///< Overlapped pipe for stderr
-#else
-    int inputPipe[2]  = {-1, -1}; ///< Stdin pipe [read, write]
-    int outputPipe[2] = {-1, -1}; ///< Stdout pipe [read, write]
-    int errorPipe[2]  = {-1, -1}; ///< Stderr pipe [read, write]
-    pid_t processId   = -1;       ///< Child process ID
-#endif
+
 
     Config config;                        ///< Current process configuration
     std::atomic<bool> isRunning_{false};  ///< True if PowerShell process is alive
@@ -148,21 +56,19 @@ private:
     std::atomic<bool> isRestarting_{false}; ///< True if a restart is in progress
     std::mutex stopMx_;                   ///< Serializes stop() invocations
     
-    std::thread writerTh_;                ///< Writer thread (stdin feeder)
-    std::thread rOutTh_;                  ///< Reader thread for stdout
-    std::thread rErrTh_;                  ///< Reader thread for stderr
-    std::atomic<bool> ioRunning_{false};  ///< True while I/O threads are active
+    std::unique_ptr<virtualshell::core::PowerShellProcess> process_; ///< Active PowerShell host process
+    virtualshell::core::IoPump io_pump_; ///< Background I/O pump mediating process streams
 
-    std::mutex              writeMx_;     ///< Protects writeQueue_
-    std::condition_variable writeCv_;     ///< Signals new data in writeQueue_
-    std::deque<std::string> writeQueue_;  ///< Pending stdin packets
+    std::mutex stdoutMx_;
+    std::condition_variable stdoutCv_;
+    std::deque<std::string> stdoutQueue_;
 
-    std::mutex              chunkMx_;     ///< Protects chunkQueue_
-    std::condition_variable chunkCv_;     ///< Signals new data in chunkQueue_
-    std::deque<OutChunk>    chunkQueue_;  ///< Buffered stdout/stderr chunks
+    std::mutex stderrMx_;
+    std::condition_variable stderrCv_;
+    std::deque<std::string> stderrQueue_;
 
     std::mutex stateMx_; ///< Protects inflight_ and inflightOrder_
-    std::unordered_map<uint64_t, std::unique_ptr<CmdState>> inflight_; ///< Active commands by ID
+    std::unordered_map<uint64_t, std::unique_ptr<virtualshell::core::CmdState>> inflight_; ///< Active commands by ID
 
     std::atomic<uint64_t> seq_{0}; ///< Monotonic sequence for command IDs
 
@@ -203,24 +109,15 @@ private:
         return ptr;
     }
 
-    /**
-     * @internal
-     * @brief Handle a single timed-out command.
-     * 
-     * Builds a timeout ExecutionResult, signals its promise/callback,
-     * and updates inflight bookkeeping.
-     * @param id Command identifier
-     */
-    void timeoutOne_(uint64_t id);
-
-    /**
-     * @internal
-     * @brief Periodically scan all in-flight commands for timeouts.
-     * 
-     * Runs inside timerThread_, checks tDeadline for each CmdState,
-     * and calls timeoutOne_ as needed.
-     */
-    void timeoutScan_();
+    TimeoutWatcher timeoutWatcher_{
+        stateMx_,
+        inflight_,
+        inflightOrder_,
+        timerRun_,
+        [this](std::unique_ptr<CmdState> st, bool expectSentinel) {
+            fulfillTimeout_(std::move(st), expectSentinel);
+        }
+    };
 
     void fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSentinel);
     void requestRestartAsync_(bool force);
@@ -550,47 +447,8 @@ public:
 
 
 private:
-    /**
-     * @internal
-     * @brief Main loop for writing commands to the PowerShell process stdin.
-     *
-     * Runs in its own thread. Pulls packets from writeQueue_ and writes them to the process.
-     */
-    void writerLoop_();
-
-    /**
-     * @internal
-     * @brief Main loop for reading from the PowerShell stdout pipe.
-     *
-     * Runs in its own thread. Dispatches received data chunks to onChunk_ with isErr=false.
-     */
-    void readerStdoutLoop_();
-
-    /**
-     * @internal
-     * @brief Main loop for reading from the PowerShell stderr pipe.
-     *
-     * Runs in its own thread. Dispatches received data chunks to onChunk_ with isErr=true.
-     */
-    void readerStderrLoop_();
-
-    /**
-     * @internal
-     * @brief Perform a single overlapped read from stdout (Windows only).
-     *
-     * @param blocking If true, block until data or EOF is available.
-     * @return Read data chunk (empty string if none available and non-blocking)
-     */
-    std::string readOutputOverlapped_(bool blocking);
-
-    /**
-     * @internal
-     * @brief Perform a single overlapped read from stderr (Windows only).
-     *
-     * @param blocking If true, block until data or EOF is available.
-     * @return Read error chunk (empty string if none available and non-blocking)
-     */
-    std::string readErrorOverlapped_(bool blocking);
+    void restoreFromSnapshot_(const std::string& restoreScriptPath,
+                             const std::string& snapshotPath);
 
     /**
      * @internal
@@ -600,100 +458,26 @@ private:
      * @param sv    String view of the data
      */
     void onChunk_(bool isErr, std::string_view sv);
+    void enqueueStreamChunk_(bool isErr, std::string_view chunk);
+    void handleErrorChunk_(std::unique_lock<std::mutex>& lk, std::string_view chunk);
+    void handleOutputChunk_(std::unique_lock<std::mutex>& lk, std::string_view chunk);
+    bool ensureCommandBegan_(uint64_t id, CmdState& state, std::string& carry);
+    bool tryFinalizeCommand_(uint64_t id, CmdState& state, std::string& carry, std::string& nextCarry);
+    bool stripTimeoutSentinel_(std::string& chunk, CmdState* state);
+    std::unique_ptr<CmdState> eraseStateLocked_(uint64_t id);
+    
+    std::future<ExecutionResult> makeErrorFuture_(int exitCode, std::string_view err) const;
+    uint64_t nextCommandId_();
+    std::unique_ptr<CmdState> createCmdState_(uint64_t id,
+                                              double timeoutSeconds,
+                                              std::function<void(const ExecutionResult&)> cb);
+    void registerCmdStateLocked_(uint64_t id, std::unique_ptr<CmdState> state);
+    void handleEnqueueFailure_(uint64_t id);
 
-    /**
-     * @internal
-     * @brief Complete a command when its end marker is detected.
-     *
-     * @param S Command state to finalize
-     * @param success Whether the command completed successfully
-     */
     void completeCmdLocked_(CmdState& S, bool success);
 
-    /**
-     * @internal
-     * @brief Start background I/O threads (writer, stdout reader, stderr reader).
-     */
-    void startIoThreads_();
+    bool sendInitialCommands_();
 
-    /**
-     * @internal
-     * @brief Stop background I/O threads and join them cleanly.
-     */
-    void stopIoThreads_();
-
-    /**
-     * @internal
-     * @brief Send the configured initial commands to the PowerShell session.
-     *
-     * Used after process startup to set encoding, error policy, or custom initialization.
-     * @return True on success, false otherwise
-     */
-    bool sendInitialCommands();
-    
-    /**
-     * @internal
-     * @brief Create pipes for stdin, stdout, and stderr communication.
-     *
-     * Platform-specific setup of process I/O redirection.
-     * @return True on success, false otherwise
-     */
-    bool createPipes();
-    
-    /**
-     * @internal
-     * @brief Close all process pipes (stdin, stdout, stderr).
-     *
-     * Safe to call multiple times; used during stop() and destructor cleanup.
-     */
-    void closePipes();
-    
-#ifdef _WIN32
-    /**
-     * @internal
-     * @brief Read data from a Windows pipe handle.
-     *
-     * @param handle Pipe handle
-     * @param buffer Destination buffer
-     * @param size   Maximum bytes to read
-     * @return Number of bytes read, or 0/negative on error
-     */
-    DWORD readFromPipe(HANDLE handle, char* buffer, DWORD size);
-#else
-    /**
-     * @internal
-     * @brief Read data from a POSIX file descriptor.
-     *
-     * @param fd     File descriptor
-     * @param buffer Destination buffer
-     * @param size   Maximum bytes to read
-     * @return Number of bytes read, or -1 on error
-     */
-    ssize_t readFromPipe(int fd, char* buffer, size_t size);
-#endif
-    
-#ifdef _WIN32
-    /**
-     * @internal
-     * @brief Write data to a Windows pipe handle.
-     *
-     * @param handle Pipe handle
-     * @param data   String to write
-     * @return True on success, false otherwise
-     */
-    bool writeToPipe(HANDLE handle, const std::string& data);
-#else
-    /**
-     * @internal
-     * @brief Write data to a POSIX file descriptor.
-     *
-     * @param fd   File descriptor
-     * @param data String to write
-     * @return True on success, false otherwise
-     */
-    bool writeToPipe(int fd, const std::string& data);
-#endif
-    
     /**
      * @internal
      * @brief Wait for the PowerShell process to become ready or exit.
@@ -701,6 +485,6 @@ private:
      * @param timeoutMs Timeout in milliseconds
      * @return True if process responded within timeout, false otherwise
      */
-    bool waitForProcess(int timeoutMs = 5000);
+    bool waitForProcess_(int timeoutMs = 5000);
     
 };

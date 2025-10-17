@@ -3,7 +3,6 @@ __pycache__/
 *.pyc
 build/
 *.egg-info/
-dev_*
 test/
 .pypirc
 dist/
