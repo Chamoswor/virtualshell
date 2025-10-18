@@ -82,7 +82,9 @@ private:
      */
     std::future<ExecutionResult> submit(std::string command,
                                         double timeoutSeconds,
-                                        std::function<void(const ExecutionResult&)> cb = nullptr, bool bypassRestart = false);
+                                        std::function<void(const ExecutionResult&)> cb = nullptr,
+                                        bool bypassRestart = false,
+                                        uint64_t* outId = nullptr);
 
     std::string lastOutput; ///< Last captured stdout (for sync APIs)
     std::string lastError;  ///< Last captured stderr (for sync APIs)
@@ -121,6 +123,7 @@ private:
 
     void fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSentinel);
     void requestRestartAsync_(bool force);
+    bool awaitLifecycleReady_(double maxWaitSeconds);
 
     std::thread timerThread_;       ///< Background watchdog thread for timeouts
     std::atomic<bool> timerRun_{false}; ///< True while timeout watchdog is active

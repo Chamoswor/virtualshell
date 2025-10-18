@@ -17,10 +17,14 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <array>
 
 // Auto-enable via env var:
 // VIRTUALSHELL_DEBUG=1
 // VIRTUALSHELL_DEBUG_PATH=C:\temp\vshell.log
+// VIRTUALSHELL_DEBUG_EXCLUDE=IO,PARSE
+
+static constexpr size_t MAX_EXCLUDED_TAGS = 16;
 
 namespace virtualshell {
 namespace dev {
@@ -53,6 +57,10 @@ public:
         if (!fh_) open_nolock_();
 
         if (!fh_) return; // give up if open failed
+
+        if (is_excluded_(tag)) {
+            return;
+        }
 
         // Timestamp (UTC), thread id
         auto now   = std::chrono::system_clock::now();
@@ -94,15 +102,59 @@ private:
     Logger() {
         const char* env_on   = std::getenv("VIRTUALSHELL_DEBUG");
         const char* env_path = std::getenv("VIRTUALSHELL_DEBUG_PATH");
+        const char* env_excl = std::getenv("VIRTUALSHELL_DEBUG_EXCLUDE");
+        set_excluded_tags_(env_excl);
+
+
         if (env_path && *env_path) path_ = env_path;
         if (env_on && *env_on == '1') {
             enabled_.store(true);
             open_nolock_();
+            logf("LOGGER", "VirtualShell debug is ENABLED via environment variable. Set VIRTUALSHELL_DEBUG=0 to disable.");
+            logf("LOGGER", "VIRTUALSHELL_DEBUG_PATH=%s", path_.empty() ? "(default)" : path_.c_str());
+            logf("LOGGER", "VIRTUALSHELL_DEBUG_EXCLUDE=%s", env_excl ? env_excl : "(none)");
         }
     }
     ~Logger() { close_nolock_(); }
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
+
+    std::array<std::string, MAX_EXCLUDED_TAGS> excluded_tags_{};
+    size_t excluded_count_{0};
+
+    void add_excluded_tag_(const char* start, const char* end) {
+        if (excluded_count_ >= excluded_tags_.size()) return;
+        const size_t len = static_cast<size_t>(end - start);
+        if (len == 0) return;
+        excluded_tags_[excluded_count_++] = std::string(start, len);
+    }
+
+
+    bool set_excluded_tags_(const char* env_excl) {
+        excluded_tags_.fill({});
+        excluded_count_ = 0;
+        if (!env_excl || *env_excl == '\0') return false;
+
+        const char* start = env_excl;
+        const char* p = env_excl;
+        while (*p != '\0') {
+            if (*p == ',') {
+                add_excluded_tag_(start, p);
+                start = p + 1;
+            }
+            ++p;
+        }
+        add_excluded_tag_(start, p);
+        return excluded_count_ > 0;
+    }
+
+    bool is_excluded_(const char* tag) const {
+        if (!tag) return false;
+        for (size_t i = 0; i < excluded_count_; ++i) {
+            if (excluded_tags_[i] == tag) return true;
+        }
+        return false;
+    }
 
     void open_nolock_() {
         if (fh_) return;

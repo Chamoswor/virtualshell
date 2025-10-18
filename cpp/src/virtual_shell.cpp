@@ -262,6 +262,7 @@ void VirtualShell::stop(bool force) {
             CmdState &state = *kv.second;
             if (!state.done.load()) {
                 state.errBuf.append("Process stopped.\n");
+                state.restartInterrupted.store(true, std::memory_order_release);
                 completeCmdLocked_(state, /*success=*/false);
             }
         }
@@ -323,17 +324,51 @@ bool VirtualShell::isAlive() const {
 VirtualShell::ExecutionResult
 VirtualShell::execute(const std::string& command, double timeoutSeconds)
 {
-    auto fut = submit(command, timeoutSeconds, nullptr);
-    const double to = (timeoutSeconds>0?timeoutSeconds:config.timeoutSeconds); // Per-call override, else default.
+    constexpr int MAX_RESTART_RETRIES = 16;
+    const double to = (timeoutSeconds > 0 ? timeoutSeconds : config.timeoutSeconds); // Per-call override, else default.
 
-    // Wait up to 'to' seconds for completion; do not block indefinitely.
-    if (fut.wait_for(std::chrono::duration<double>(to)) == std::future_status::ready)
-        return fut.get();
+    for (int attempt = 0; attempt < MAX_RESTART_RETRIES; ++attempt) {
+        uint64_t cmdId = 0;
+        auto fut = submit(command, timeoutSeconds, nullptr, /*bypassRestart=*/false, &cmdId);
 
-    // Timeout path: return a synthetic timeout result immediately.
-    // NOTE: The underlying command may still complete later; parser must ignore late chunks
-    // for this command. Ensure submit()/timeoutScan_ marks the CmdState as "timed out".
-    ExecutionResult r{}; r.success=false; r.exitCode=-1; r.err="timeout";
+        if (fut.wait_for(std::chrono::duration<double>(to)) == std::future_status::ready) {
+            ExecutionResult res = fut.get();
+
+            if (!res.success && res.exitCode == -2 && config.autoRestartOnTimeout) {
+                VSHELL_DBG("RESTART", "retrying command after restart interruption attempt=%d", attempt + 1);
+                (void)awaitLifecycleReady_(to);
+                continue;
+            }
+
+            return res;
+        }
+
+        if (cmdId != 0) {
+            timeoutWatcher_.timeoutOne(cmdId);
+
+            if (config.autoRestartOnTimeout) {
+                using clock = std::chrono::steady_clock;
+                const auto deadline = clock::now() + std::chrono::seconds(5);
+                while (isRestarting_.load(std::memory_order_acquire)) {
+                    if (clock::now() >= deadline) {
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+            }
+        }
+
+        ExecutionResult r{};
+        r.success = false;
+        r.exitCode = -1;
+        r.err = "timeout";
+        return r;
+    }
+
+    ExecutionResult r{};
+    r.success = false;
+    r.exitCode = -2;
+    r.err = "restart retry limit reached";
     return r;
 }
 
@@ -821,15 +856,12 @@ std::string VirtualShell::build_pwsh_packet(uint64_t id, std::string_view cmd) {
     std::string full;
     full.reserve(cmd.size() + beg.size() + end.size() + 96);
 
-    // 1) BEG neds quoting
-    full += "[Console]::Out.WriteLine(" + ps_quote_single(beg) + ")\n";
+    full += "[Console]::Out.WriteLine(" + ps_quote_single(beg) + ")\n"; // Begin marker
 
-    // 2) COMMAND ( may contain multiple lines; must end with newline)
     full.append(cmd);
-    if (full.empty() || full.back() != '\n') full.push_back('\n');
+    if (full.empty() || full.back() != '\n') full.push_back('\n'); // Ensure trailing newline
 
-    // 3) END neds quoting
-    full += "[Console]::Out.WriteLine(" + ps_quote_single(end) + ")\n";
+    full += "[Console]::Out.WriteLine(" + ps_quote_single(end) + ")\n"; // End marker
 
     return full;
 }
@@ -897,10 +929,52 @@ void VirtualShell::handleEnqueueFailure_(uint64_t id) {
     }
 }
 
+bool VirtualShell::awaitLifecycleReady_(double maxWaitSeconds) {
+    using clock = std::chrono::steady_clock;
+
+    double budget = maxWaitSeconds;
+    if (budget <= 0.0) {
+        budget = (config.timeoutSeconds > 0)
+            ? static_cast<double>(config.timeoutSeconds)
+            : 5.0;
+    }
+
+    if (budget < 1.0) {
+        budget = 1.0; // Always allow a short grace window for lifecycle transitions.
+    }
+
+    const auto deadline = clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(budget));
+
+    while (true) {
+        const bool gate = lifecycleGate_.load(std::memory_order_acquire);
+        const bool running = isRunning_.load(std::memory_order_acquire);
+        if (!gate && running) {
+            return true;
+        }
+
+        if (!gate && !running && !isRestarting_.load(std::memory_order_acquire)) {
+            return true; // Caller will surface the "not running" condition.
+        }
+
+        if (clock::now() >= deadline) {
+            return false;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
 std::future<VirtualShell::ExecutionResult>
 VirtualShell::submit(std::string command, double timeoutSeconds,
-                     std::function<void(const ExecutionResult&)> cb, bool bypassRestart)
+                     std::function<void(const ExecutionResult&)> cb, bool bypassRestart,
+                     uint64_t* outId)
 {
+    if (!bypassRestart) {
+        if (!awaitLifecycleReady_(timeoutSeconds)) {
+            return makeErrorFuture_(-2, "PowerShell process is restarting (wait timeout)");
+        }
+    }
+
     if (lifecycleGate_.load(std::memory_order_acquire) && !bypassRestart) {
         return makeErrorFuture_(-2, "PowerShell process is restarting");
     }
@@ -913,6 +987,10 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
     auto state = createCmdState_(id, timeoutSeconds, std::move(cb));
     auto fut = state->prom.get_future();
 
+    if (outId) {
+        *outId = id;
+    }
+
     registerCmdStateLocked_(id, std::move(state));
 
     // Update in-flight counters and track a simple high-water mark (for diagnostics/metrics).
@@ -924,11 +1002,11 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
 
     std::string packet = build_pwsh_packet(id, command);
     const size_t packetSize = packet.size();
-    VSHELL_DBG("IO", "write id=%llu bytes=%zu cmd=\"%s\"",
+    VSHELL_DBG("IO-CMD", "write id=%llu bytes=%zu cmd=\"%s\"",
                static_cast<unsigned long long>(id), packetSize, command.c_str());
 
     if (!io_pump_.enqueue_write(std::move(packet))) {
-        VSHELL_DBG("IO", "enqueue failed id=%llu", static_cast<unsigned long long>(id));
+        VSHELL_DBG("IO-CMD", "enqueue failed id=%llu", static_cast<unsigned long long>(id));
         handleEnqueueFailure_(id);
     }
 
@@ -1090,6 +1168,13 @@ bool VirtualShell::ensureCommandBegan_(uint64_t id, CmdState& state, std::string
     state.begun = true;
     VSHELL_DBG("PARSE", "BEGIN id=%llu", static_cast<unsigned long long>(id));
 
+    if (state.timeoutSec > 0.0) {
+        using clock = std::chrono::steady_clock;
+        state.tStart = clock::now();
+        auto delta = std::chrono::duration<double>(state.timeoutSec);
+        state.tDeadline = state.tStart + std::chrono::duration_cast<clock::duration>(delta);
+    }
+
     carry.swap(postBeg);
     return true;
 }
@@ -1151,10 +1236,22 @@ void VirtualShell::completeCmdLocked_(CmdState& S, bool success) {
     const auto now = clock::now();
 
     ExecutionResult r{};
-    r.success = success && !S.timedOut.load(); // A timed-out command cannot be reported as success.
-    r.exitCode = r.success ? 0 : -1;
+    const bool timedOut = S.timedOut.load(std::memory_order_acquire);
+    const bool interrupted = S.restartInterrupted.load(std::memory_order_acquire);
+
+    if (interrupted) {
+        r.success = false;
+        r.exitCode = -2;
+    } else {
+        r.success = success && !timedOut; // A timed-out command cannot be reported as success.
+        r.exitCode = r.success ? 0 : -1;
+    }
+
     r.out   = std::move(S.outBuf);
-    r.err    = std::move(S.errBuf);
+    r.err   = std::move(S.errBuf);
+    if (interrupted && r.err.empty()) {
+        r.err = "Process stopped.\n";
+    }
     r.executionTime = std::chrono::duration<double>(now - S.tStart).count();
 
     VSHELL_DBG("COMPLETE", "id=%llu success=%d exit=%d timedOut=%d out=%zu err=%zu",
@@ -1189,8 +1286,8 @@ void VirtualShell::fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSent
 
     if (config.autoRestartOnTimeout) {
         VSHELL_DBG("TIMEOUT", "id=%llu scheduling forced restart", static_cast<unsigned long long>(st->id));
-        requestRestartAsync_(true);
         isRestarting_.store(true, std::memory_order_release);
+        requestRestartAsync_(true);
     }
 
     st->done.store(true);
@@ -1227,10 +1324,12 @@ void VirtualShell::requestRestartAsync_(bool force) {
                     VSHELL_DBG("TIMEOUT", "restart start() failed");
                 }
                 self->lifecycleGate_.store(false, std::memory_order_release);
+                self->isRestarting_.store(false, std::memory_order_release);
             }
         }).detach();
     } catch (...) {
         lifecycleGate_.store(false, std::memory_order_release);
+        isRestarting_.store(false, std::memory_order_release);
         VSHELL_DBG("TIMEOUT", "failed to spawn restart thread");
     }
 }

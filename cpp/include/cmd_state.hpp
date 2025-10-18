@@ -22,6 +22,7 @@ namespace core {
         std::string                        preBuf{};      ///< Buffer for data before begin marker
         std::atomic<bool>                  done{false}; ///< True once command is completed
         std::atomic<bool>                  timedOut{false}; ///< True if command exceeded timeout
+        std::atomic<bool>                  restartInterrupted{false}; ///< True if command was aborted during restart
         double                             startMonotonic{}; ///< Start time in monotonic seconds
         double                             timeoutSec{}; ///< Timeout in seconds for this command
         std::function<void(const ExecutionResult&)> cb{};  ///< Optional callback for completion
