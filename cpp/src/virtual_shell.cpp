@@ -865,13 +865,7 @@ VirtualShell::createCmdState_(uint64_t id,
     state->beginMarker = "<<<SS_BEG_" + std::to_string(id) + ">>>";
     state->endMarker = "<<<SS_END_" + std::to_string(id) + ">>>";
     state->cb = std::move(cb);
-
-    if (state->timeoutSec > 0.0) {
-        auto delta = std::chrono::duration<double>(state->timeoutSec);
-        state->tDeadline = state->tStart + std::chrono::duration_cast<clock::duration>(delta);
-    } else {
-        state->tDeadline = clock::time_point::max();
-    }
+    state->tDeadline = clock::time_point::max();
 
     return state;
 }
