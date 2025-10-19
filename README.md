@@ -1,200 +1,171 @@
-# 🧠 virtualshell
+def on_done(result):
+# virtualshell
 
-**Run PowerShell like a compiled language.**  
-`virtualshell` is a **high-performance C++ bridge** exposing a persistent PowerShell runtime to Python — with **async execution**, **session reuse**, and **millisecond-level latency**.  
+High-performance PowerShell automation for Python. `virtualshell` keeps a single PowerShell host warm and exposes it through a thin Python wrapper backed by a C++ engine. The result: millisecond-scale latency, async execution, and session persistence without juggling subprocesses.
 
-Forget the cost of `subprocess.run("pwsh ...")` — now you can run thousands of PowerShell commands per second, reuse modules and environment, and stream results safely from a persistent backend.
-
----
-
-## 🚀 Why `virtualshell`?
-
-> **"PowerShell automation at C++ speed — controlled from Python."**
-
-`virtualshell` was designed for engineers who integrate PowerShell into larger Python workflows and need:
-- 💡 **Low latency** — one persistent PowerShell host instead of spawning a process for each command.  
-- ⚙️ **Thread-safe async API** — run hundreds of commands concurrently without GIL blocking.  
-- 🧩 **Session state** — keep `$env:*`, modules, and variables alive between invocations.  
-- 🔥 **C++ backend** — minimal Python overhead; full parallelism in native threads.  
-- 🧱 **Predictable errors** — typed exceptions and structured results.  
-
-Typical use cases:
-- Orchestrating Windows services, AD, Exchange, or Azure via Python.  
-- Continuous monitoring or job runners that need to execute many PS commands efficiently.  
-- Embedding PowerShell automation into async Python web servers or data pipelines.  
-- Unit-testing PowerShell scripts programmatically without process churn.
+> Full documentation now lives in the [project wiki](docs/wiki). This README gives you the essentials and quick links.
 
 ---
 
-## 📦 Installation
+## Why virtualshell?
+
+- **Persistent session** – reuse modules, `$env:*`, and functions between calls.
+- **Low latency** – avoid the 200+ ms penalty of `subprocess.run("pwsh")`; most commands settle in ~2-4 ms.
+- **Async + batching** – schedule commands concurrently or in batches with strong timeout control.
+- **Structured results** – every invocation returns stdout/stderr, exit code, success flag, and timing.
+- **Predictable failures** – typed Python exceptions for “pwsh missing”, timeouts, and execution errors.
+
+Typical users embed PowerShell inside Python orchestration, long-running agents, or test suites that need reliability and speed.
+
+---
+
+## Installation
 
 ```bash
 pip install virtualshell
-````
+```
 
-Wheels are provided for Windows, Linux (x86_64/aarch64), and macOS (universal2).
-Requires **PowerShell (`pwsh`)** or **Windows PowerShell (`powershell`)** in `PATH`.
+Pre-built wheels are published for Windows, Linux (x86_64/aarch64), and macOS universal2. PowerShell (`pwsh` or `powershell.exe`) must be discoverable on `PATH` unless you pass an explicit path.
 
 ---
 
-## ⚡ Quick example
+## Quick start
 
 ```python
 from virtualshell import Shell
 
-# Persistent PowerShell session with a 5s timeout
-sh = Shell(timeout_seconds=5).start()
+with Shell(timeout_seconds=5) as sh:
+    result = sh.run("Write-Output 'Hello from pwsh'")
+    print(result.out.strip())
 
-print(sh.run("Write-Output 'Hello, World'").out.strip())
-# -> Hello, World
-
-# Maintain global variables and modules between calls
-sh.run("function Inc { $global:i++; $global:i }")
-for _ in range(3):
-    print(sh.run("Inc").out.strip())  # 1, 2, 3
-
-sh.stop()
+    sh.run("function Inc { $global:i++; $global:i }")
+    print(sh.run("Inc").out.strip())  # 1
+    print(sh.run("Inc").out.strip())  # 2
 ```
 
-Async example:
+### Async execution
 
 ```python
 from virtualshell import Shell
 import asyncio
 
 async def main():
-    sh = Shell().start()
-    fut = sh.run_async("Get-Date")
+    shell = Shell().start()
+    fut = shell.run_async("Get-Date")
     res = await asyncio.wrap_future(fut)
     print(res.out.strip())
-    sh.stop()
+    shell.stop()
 
 asyncio.run(main())
 ```
 
----
-
-## 🧩 Key features
-
-| Capability                     | Description                                                     |
-| ------------------------------ | --------------------------------------------------------------- |
-| ⚙️ **Persistent session**      | Keep modules, environment, and variables alive between commands |
-| ⚡ **Async & batch execution**  | Fire hundreds of PowerShell calls concurrently with callbacks   |
-| 🧱 **Script execution**        | Run `.ps1` files with positional or named arguments             |
-| ⏱️ **Timeouts & cancellation** | Per-command timeout enforcement in C++ thread watchdog          |
-| 🧼 **Clear error semantics**   | Typed exceptions or structured return values                    |
-| 🧵 **Thread-friendly**         | No Python GIL locks — all async done in native C++ threads      |
-| 🧰 **Cross-platform**          | Works on Windows, Linux, and macOS with `pwsh` 7+               |
-
----
-
-## 🧠 Design
-
-At its core, `virtualshell` hosts a **long-lived PowerShell process** managed entirely in C++:
-
-* Uses **pipes and overlapped I/O** for full-duplex communication.
-* Demultiplexes stdout/stderr at high throughput (64 KB buffers).
-* Handles per-command timeouts and futures natively.
-* Provides a clean Python API via **pybind11**.
-
-This design eliminates the startup cost (~200 ms+) of each PowerShell invocation and allows PowerShell to behave like a coroutine-friendly REPL that Python controls.
-
-```mermaid
-flowchart LR
-    A[Python code] -->|pybind11| B[VirtualShell C++ Engine]
-    B --> C[pwsh.exe -NoProfile -NoExit -Command -]
-    C -->|stdout/stderr| B
-    B --> A
-```
-
----
-
-## 🧪 API overview
+### Scripts and arguments
 
 ```python
+from pathlib import Path
 from virtualshell import Shell
 
-sh = Shell(timeout_seconds=3).start()
+shell = Shell().start()
 
-# One-liner
-res = sh.run("Get-Process | Select -First 1")
-print(res.out)
+# Positional arguments
+shell.script(Path("./scripts/test.ps1"), args=["alpha", "42"])
 
-# Script (positional)
-sh.run_script("C:/temp/test.ps1", args=["alpha", "42"])
-
-# Script (named)
-sh.run_script_kv("C:/temp/test.ps1", named_args={"Name":"Alice","Count":"3"})
-
-# Async with callback
-def on_done(result):
-    print("Exit:", result.exit_code, "Took:", result.execution_time, "s")
-
-sh.run_async("Get-Random", callback=on_done)
-
-sh.stop()
-```
-
----
-
-## 📊 Performance snapshot
-
-| Operation                      | subprocess (ms) | virtualshell (ms) |
-| ------------------------------ | --------------- | ----------------- |
-| Start PowerShell & run command | 200–400 ms      | **≈ 1–3 ms**      |
-| 1000 sequential commands       | ~60 s           | **< 2 s**         |
-| Async batch (10× parallel)     | n/a             | **sub-second**    |
-
-*(Benchmarks measured on Windows 11, PowerShell 7.4, Python 3.12)*
-
----
-
-## 🧰 Exception model
-
-```python
-from virtualshell.errors import (
-    ExecutionError,
-    ExecutionTimeoutError,
-    PowerShellNotFoundError,
+# Named arguments (hashtable splatting)
+shell.script(
+    Path("./scripts/test.ps1"),
+    args={"Name": "Alice", "Count": "3"},
 )
 
-try:
-    sh.run("throw 'boom'", raise_on_error=True)
-except ExecutionTimeoutError:
-    print("Command timed out!")
-except ExecutionError as e:
-    print("PowerShell failed:", e)
+shell.stop()
 ```
+
+Every API surface (sync/async/script) accepts `timeout` overrides and optional error raising via `raise_on_error` or callbacks.
 
 ---
 
-## 🔧 Configuration
+## Core API overview
+
+| Method | Purpose |
+| --- | --- |
+| `Shell.run(cmd, *, timeout=None, raise_on_error=False)` | Execute a single command synchronously. |
+| `Shell.run_async(cmd, *, callback=None, timeout=None)` | Schedule a command; returns a `concurrent.futures.Future`. |
+| `Shell.script(path, args=None, *, timeout=None, dot_source=False, raise_on_error=False)` | Execute `.ps1` files with positional or named arguments. |
+| `Shell.script_async(...)` | Async counterpart of `script`. |
+| `Shell.save_session()` | Persist the current session to an XML snapshot. |
+| `Shell.pwsh(text)` | Safely echo a literal PowerShell string (auto quoting). |
+| `Shell.set_environment_variable(name, value)` | Mutate the child process environment. |
+
+More helpers live in the wiki, including session restore, batching, and diagnostic tips.
+
+---
+
+## Configuration
 
 ```python
 from virtualshell import Shell
 
-sh = Shell(
+shell = Shell(
     powershell_path=r"C:\Program Files\PowerShell\7\pwsh.exe",
-    environment={"MY_ENV": "123"},
+    working_directory=r"C:\automation",
+    environment={"MY_FLAG": "1"},
     initial_commands=[
         "$ErrorActionPreference = 'Stop'",
-        "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()"
+        "$ProgressPreference = 'SilentlyContinue'",
     ],
+    timeout_seconds=10,
+    auto_restart_on_timeout=True,
 )
+
+shell.start()
 ```
 
-All configuration is applied before startup — you can introspect or update via `.get_config()` / `.update_config()` if the process is stopped.
+Configuration is applied before the process starts. You can inspect or replace it later with `shell._core.get_config()` or rebuild the shell.
 
 ---
 
-## 🧱 Building from source
+## Error handling
 
-Requirements:
+```python
+from virtualshell import Shell
+from virtualshell.errors import ExecutionError, ExecutionTimeoutError
 
-* Python ≥3.8
-* CMake ≥3.20
-* C++17 compiler
-* `scikit-build-core`, `pybind11`
+shell = Shell().start()
+
+try:
+    shell.run("throw 'boom'", raise_on_error=True)
+except ExecutionTimeoutError:
+    print("Timed out")
+except ExecutionError as exc:
+    print("PowerShell failure:", exc)
+finally:
+    shell.stop()
+```
+
+Refer to `virtualshell.errors` for all exception types.
+
+---
+
+## Performance
+
+Up-to-date benchmark artefacts (`bench.json`, `bench.csv`) and analysis live in [docs/wiki/Project/Benchmarks.md](docs/wiki/Project/Benchmarks.md). Headline numbers from the latest run (Windows 11, Python 3.13):
+
+- Sequential commands: ~3.5 ms average
+- Batch commands: ~3.2 ms per command
+- Async latency: ~1.9–2.4 ms with 50 outstanding tasks
+- Session save: ~0.30 s median
+
+See the wiki for charts and methodology.
+
+---
+
+## Building from source
+
+Dependencies:
+
+- Python 3.8+
+- CMake 3.20+
+- A C++17 compiler (MSVC, Clang, or GCC)
+- `scikit-build-core`, `pybind11`
 
 ```bash
 python -m pip install -U build
@@ -204,22 +175,14 @@ python -m pip install dist/virtualshell-*.whl
 
 ---
 
-## 🗺️ Roadmap
+## Learn more
 
-* ✅ Windows, Linux, macOS wheels
-* ✅ Async batch execution
-* ⏳ Streaming I/O events and progress API
-* ⏳ Rich typed outputs for PowerShell objects
+- [Usage guides](docs/wiki/Usage)
+- [Performance tips](docs/wiki/Usage/Performance%20Tips.md)
+- [Benchmarks](docs/wiki/Project/Benchmarks.md)
 
----
-
-## 📄 License
-
-Apache 2.0 — see [LICENSE](LICENSE)
+Bug reports and feature requests are welcome via issues or discussions.
 
 ---
 
-**VirtualShell** bridges **Python’s orchestration power** with **PowerShell’s system control** —
-without the latency of spawning processes or the fragility of subprocess pipes.
-
-> *“If you use PowerShell in your workflow more than once per second — you want VirtualShell.”*
+Licensed under the Apache 2.0 license. See [LICENSE](LICENSE).
