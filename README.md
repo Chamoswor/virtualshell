@@ -92,7 +92,6 @@ Every API surface (sync/async/script) accepts `timeout` overrides and optional e
 | `Shell.script_async(...)` | Async counterpart of `script`. |
 | `Shell.save_session()` | Persist the current session to an XML snapshot. |
 | `Shell.pwsh(text)` | Safely echo a literal PowerShell string (auto quoting). |
-| `Shell.set_environment_variable(name, value)` | Mutate the child process environment. |
 
 More helpers live in the wiki, including session restore, batching, and diagnostic tips.
 
