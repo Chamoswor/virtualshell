@@ -153,9 +153,9 @@ python -m pip install dist/virtualshell-*.whl
 
 ## Learn more
 
-- [Usage guides](docs/wiki/Usage)
-- [Performance tips](docs/wiki/Usage/Performance%20Tips.md)
-- [Benchmarks](docs/wiki/Project/Benchmarks.md)
+- [Usage guides](wiki/Usage)
+- [Performance tips](wiki/Usage/Performance%20Tips.md)
+- [Benchmarks](wiki/Project/Benchmarks.md)
 
 Bug reports and feature requests are welcome via issues or discussions.
 
