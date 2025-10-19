@@ -49,6 +49,7 @@ VirtualShell::VirtualShell(VirtualShell&& other) noexcept
         other.stop(true);
     }
 
+    // Transfer backend resources and queues; guard against concurrent readers with scoped locks.
     io_pump_ = std::move(other.io_pump_);
     process_ = std::move(other.process_);
 
@@ -85,6 +86,7 @@ VirtualShell& VirtualShell::operator=(VirtualShell&& other) noexcept {
         return *this;
     }
 
+    // Ensure we tear down our own process before adopting the other instance’s state.
     if (isRunning_) {
         stop(true);
     }
@@ -187,6 +189,7 @@ bool VirtualShell::start() {
     }
 
     try {
+        // Start pumping stdout/stderr so we can parse markers emitted by build_pwsh_packet().
         io_pump_.start(*process, [this](bool isErr, std::string_view chunk) {
             onChunk_(isErr, chunk);
         });
@@ -209,6 +212,7 @@ bool VirtualShell::start() {
     lifecycleGate_.store(false, std::memory_order_release);
 
     timerRun_ = true;
+    // Background watchdog scans inflight commands for deadlines.
     timerThread_ = std::thread([this] { timeoutWatcher_.scan(); });
 
     try {
@@ -485,23 +489,18 @@ VirtualShell::executeAsync_script(std::string scriptPath,
 }
 
 
-VirtualShell::ExecutionResult VirtualShell::execute_batch(
+std::vector<VirtualShell::ExecutionResult> VirtualShell::execute_batch(
     const std::vector<std::string>& commands, double timeoutSeconds)
 {
-    // Pre-size buffer for single write to the child (reduces syscalls/copies).
-    size_t cap = 0;
-    for (const auto& c : commands) cap += c.size() + 1; // + '\n'
-    std::string joined;
-    joined.reserve(cap);
+    std::vector<ExecutionResult> results;
+    results.reserve(commands.size());
 
-    // Concatenate commands with trailing newlines so the shell executes each line.
-    for (const auto& c : commands) {
-        if (!c.empty()) {
-            joined.append(c);
-            joined.push_back('\n');
-        }
+    for (const auto& cmd : commands) {
+        ExecutionResult r = execute(cmd, timeoutSeconds);
+        results.push_back(std::move(r));
     }
-    return execute(joined, timeoutSeconds);
+
+    return results;
 }
 
 std::future<std::vector<VirtualShell::ExecutionResult>>
@@ -1038,6 +1037,7 @@ void VirtualShell::onChunk_(bool isErr, std::string_view sv) {
     std::unique_lock<std::mutex> lk(stateMx_);
 
     if (isErr) {
+        // Stderr carries timeout sentinels and error text; handle separately before returning to readers.
         handleErrorChunk_(lk, sv);
         return;
     }
@@ -1127,6 +1127,7 @@ bool VirtualShell::stripTimeoutSentinel_(std::string& chunk, CmdState* st) {
         chunk.erase(pos, eraseEnd - pos);
 
         if (expected > 0) {
+            // Drop the sentinel silently; timeoutWatcher_ already consumed the matching command.
             pendingTimeoutSentinels_.fetch_sub(1, std::memory_order_relaxed);
             continue;
         }
@@ -1149,6 +1150,7 @@ bool VirtualShell::ensureCommandBegan_(uint64_t id, CmdState& state, std::string
     if (bpos == std::string::npos) {
         constexpr size_t CAP = 256 * 1024;
         if (state.preBuf.size() > CAP) {
+            // Avoid unbounded growth if the marker never arrives (e.g. console spam).
             state.preBuf.erase(0, state.preBuf.size() - CAP);
         }
         carry.clear();
@@ -1175,6 +1177,7 @@ bool VirtualShell::ensureCommandBegan_(uint64_t id, CmdState& state, std::string
         state.tDeadline = state.tStart + std::chrono::duration_cast<clock::duration>(delta);
     }
 
+    // Whatever followed the begin marker now moves into carry for payload handling.
     carry.swap(postBeg);
     return true;
 }
@@ -1208,6 +1211,7 @@ bool VirtualShell::tryFinalizeCommand_(uint64_t id,
                state.outBuf.size(),
                state.errBuf.size());
 
+    // Move any trailing data (beginning of the next command) so callers can continue parsing.
     return true;
 }
 

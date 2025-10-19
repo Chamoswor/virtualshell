@@ -4,17 +4,16 @@
 #endif
 
 
+/**
+ * @brief Helper utilities shared across the VirtualShell C++ implementation.
+ */
 namespace virtualshell::helpers {
-// ==============================
-// Windows helpers / shims
-// ==============================
 #ifdef _WIN32
 
 namespace win {
+
 /**
- * Convert UTF-16 (Windows wide string) to UTF-8.
- * Note: allocates once using the exact required byte count.
- * Failure returns empty string.
+ * @brief Convert a wide string to UTF-8 using Win32 conversion routines.
  */
 static std::string wstring_to_utf8(const std::wstring& w) {
     if (w.empty()) return {};
@@ -29,6 +28,9 @@ static std::string wstring_to_utf8(const std::wstring& w) {
 #endif
 
 namespace parsers {
+/**
+ * @brief Trim ASCII whitespace from both ends of a string in-place.
+ */
 static inline void trim_inplace(std::string& s) {
     // Remove leading/trailing whitespace (space, tab, CR, LF) in-place.
     auto is_space = [](unsigned char ch){ return ch==' '||ch=='\t'||ch=='\r'||ch=='\n'; };
@@ -41,10 +43,11 @@ static inline void trim_inplace(std::string& s) {
     s.assign(s.begin()+a, s.begin()+b);
 }
 
+/**
+ * @brief Quote a string as a PowerShell single-quoted literal.
+ */
 static inline std::string ps_quote(const std::string& s) {
-    // Quote a string for PowerShell literal context.
-    // - Encloses with single quotes.
-    // - Internal single quotes are doubled (' -> '').
+
     std::string t;
     t.reserve(s.size() + 2);
     t.push_back('\'');

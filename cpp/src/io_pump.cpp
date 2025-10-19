@@ -26,6 +26,7 @@ IoPump::~IoPump() {
 }
 
 IoPump::IoPump(IoPump&& other) noexcept {
+    // Transfer ownership while holding the source lifecycle guard to avoid racing the worker threads.
     std::lock_guard<std::mutex> guard(other.lifecycle_mutex_);
 
     running_.store(other.running_.load(std::memory_order_acquire), std::memory_order_release);
@@ -48,6 +49,7 @@ IoPump& IoPump::operator=(IoPump&& other) noexcept {
         return *this;
     }
 
+    // Lock both lifecycles to ensure no threads mutate shared state during reassignment.
     std::scoped_lock guard(lifecycle_mutex_, other.lifecycle_mutex_);
 
     stop_locked_();
@@ -77,6 +79,7 @@ void IoPump::start(Process& process, ChunkHandler handler) {
     process_ = &process;
     handler_ = std::move(handler);
 
+    // Mark the pump active before we spin up threads so they observe the flag.
     running_.store(true, std::memory_order_release);
 
     stdout_thread_ = std::thread(&IoPump::reader_loop_, this, false);
@@ -95,6 +98,7 @@ bool IoPump::enqueue_write(std::string data) {
         return false;
     }
 
+    // Queue the payload for the writer thread and wake it up.
     write_queue_.emplace_back(std::move(data));
     write_cv_.notify_one();
     return true;
@@ -115,6 +119,7 @@ void IoPump::stop_locked_() {
         return;
     }
 
+    // Signal the child to close pipes so reader threads unblock cleanly.
     if (process_) {
         process_->shutdown_streams();
     }
@@ -144,6 +149,7 @@ void IoPump::reader_loop_(bool is_stderr) {
         }
 
         if (!chunk) {
+            // Nullopt indicates EOF/pipe closed; exit the loop so stop() can reclaim threads.
             break;
         }
 
@@ -155,6 +161,7 @@ void IoPump::reader_loop_(bool is_stderr) {
         try {
             handler(is_stderr, *chunk);
         } catch (...) {
+            // Defensive: stop pumping if the handler throws to avoid tight retry loops.
             break;
         }
     }
@@ -201,6 +208,7 @@ void IoPump::writer_loop_() {
         }
 
         if (!ok) {
+            // If the write fails, shut the pump down so callers can respond to the broken pipe.
             running_.store(false, std::memory_order_release);
             write_cv_.notify_all();
             if (process_) {

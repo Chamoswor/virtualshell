@@ -11,7 +11,14 @@
 namespace virtualshell {
 namespace core {
 
-        struct CmdState {
+    /**
+     * @brief Bookkeeping for an in-flight PowerShell command.
+     *
+     * Tracks buffers, lifecycle markers, timing metadata, and the completion
+     * promise/callback so VirtualShell can resolve results once PowerShell
+     * signals completion or timeout.
+     */
+    struct CmdState {
         uint64_t                           id{};          ///< Unique command identifier
         std::promise<ExecutionResult>      prom{};        ///< Promise to deliver the command result
         std::string                        outBuf{};      ///< Accumulated stdout buffer
@@ -27,6 +34,6 @@ namespace core {
         double                             timeoutSec{}; ///< Timeout in seconds for this command
         std::function<void(const ExecutionResult&)> cb{};  ///< Optional callback for completion
         std::chrono::steady_clock::time_point tStart{};   ///< Start timestamp
-        std::chrono::steady_clock::time_point tDeadline{};///< Absolute deadline for timeout
+        std::chrono::steady_clock::time_point tDeadline{};///< Absolute deadline for timeout (steady_clock)
     };
 }} // namespace virtualshell::core

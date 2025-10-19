@@ -13,12 +13,28 @@
 namespace virtualshell {
 namespace core {
 
+/**
+ * @brief Watches active commands and fulfils them once their deadline passes.
+ *
+ * The watcher runs on a dedicated thread, scanning the shared inflight map.
+ * When a command times out it delegates to the provided fulfil function which
+ * performs cleanup and surfaces the timeout back to callers.
+ */
 class TimeoutWatcher {
 public:
     using InflightMap   = std::unordered_map<uint64_t, std::unique_ptr<CmdState>>;
     using InflightQueue = std::deque<uint64_t>;
     using FulfillFn     = std::function<void(std::unique_ptr<CmdState>, bool)>;
 
+    /**
+     * @brief Construct a watcher binding to the shared command collections.
+     *
+     * @param stateMx Mutex guarding inflight state
+     * @param inflight Map of command id -> state
+     * @param inflightOrder FIFO order of submitted commands
+     * @param timerRun Flag toggled by the owning VirtualShell to stop scanning
+     * @param fulfill Callback invoked to finish a timed-out command
+     */
     TimeoutWatcher(std::mutex& stateMx,
                    InflightMap& inflight,
                    InflightQueue& inflightOrder,
@@ -30,6 +46,9 @@ public:
           timerRun_(timerRun),
           fulfill_(std::move(fulfill)) {}
 
+    /**
+     * @brief Force a specific command id to timeout immediately.
+     */
     void timeoutOne(uint64_t id) {
         std::unique_ptr<CmdState> st;
         {
@@ -50,6 +69,9 @@ public:
         fulfill_(std::move(st), true);
     }
 
+    /**
+     * @brief Periodically walk inflight commands, fulfilling any past deadline.
+     */
     void scan() {
         using clock = std::chrono::steady_clock;
         while (timerRun_) {

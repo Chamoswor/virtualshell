@@ -39,8 +39,17 @@ class PowerShellProcess;
  * without showing a window.
  */
 class VirtualShell : public std::enable_shared_from_this<VirtualShell> {
+    /**
+     * @brief Compose a framed payload understood by the PowerShell listener.
+     *
+     * Adds message metadata (command id framing) around the raw script text so
+     * the embedded PowerShell host can correlate responses.
+     */
     static std::string build_pwsh_packet(uint64_t id, std::string_view cmd);
 public:
+    /**
+     * @brief Tagged chunk emitted by the background I/O pump.
+     */
     struct OutChunk { bool isErr; std::string data; };
     using CmdState = virtualshell::core::CmdState;
     using ExecutionResult = virtualshell::core::ExecutionResult;
@@ -72,19 +81,7 @@ private:
 
     std::atomic<uint64_t> seq_{0}; ///< Monotonic sequence for command IDs
 
-    /**
-     * @internal
-     * @brief Enqueue a command for execution.
-     * @param command Command string to run
-     * @param timeoutSeconds Timeout (0 = use default)
-     * @param cb Optional completion callback
-     * @return Future resolving to the ExecutionResult
-     */
-    std::future<ExecutionResult> submit(std::string command,
-                                        double timeoutSeconds,
-                                        std::function<void(const ExecutionResult&)> cb = nullptr,
-                                        bool bypassRestart = false,
-                                        uint64_t* outId = nullptr);
+
 
     std::string lastOutput; ///< Last captured stdout (for sync APIs)
     std::string lastError;  ///< Last captured stderr (for sync APIs)
@@ -220,7 +217,30 @@ public:
      */
     bool isAlive() const;
 
+    /**
+     * @brief Report whether the worker is currently cycling the PowerShell process.
+     */
     bool isRestarting() const { return isRestarting_.load(std::memory_order_acquire); }
+
+    /**
+     * @brief Return the configured default timeout (seconds) for new commands.
+     */
+    int getDefaultTimeout() const { return config.timeoutSeconds; }
+
+    /**
+     * @brief Enqueue a command for execution.
+     * @param command Command string to run
+     * @param timeoutSeconds Timeout (0 = use default)
+     * @param cb Optional completion callback
+    * @param bypassRestart If true, skip safety checks while a restart is underway
+    * @param outId Optional pointer receiving the assigned command identifier
+     * @return Future resolving to the ExecutionResult
+     */
+    std::future<ExecutionResult> submit(std::string command,
+                                        double timeoutSeconds,
+                                        std::function<void(const ExecutionResult&)> cb = nullptr,
+                                        bool bypassRestart = false,
+                                        uint64_t* outId = nullptr);
     
 
     /**
@@ -239,9 +259,9 @@ public:
      * 
      * @param commands Vector of command strings
      * @param timeoutSeconds Timeout per command (0 = use default)
-     * @return ExecutionResult Final result (aggregate or last command depending on implementation)
+     * @return std::vector<ExecutionResult> Final result as an array of ExecutionResult objects
      */
-    ExecutionResult execute_batch(const std::vector<std::string>& commands, double timeoutSeconds = 0.0);
+    std::vector<ExecutionResult> execute_batch(const std::vector<std::string>& commands, double timeoutSeconds = 0.0);
 
     /**
      * @brief Execute a PowerShell script with named parameters (key/value pairs).
@@ -282,6 +302,7 @@ public:
      * 
      * @param command Command string to execute
      * @param callback Optional callback invoked when the result is available
+    * @param timeoutSeconds Timeout (0 = use default)
      * @return std::future<ExecutionResult> Future that resolves when the command completes
      */
     std::future<ExecutionResult>
@@ -450,6 +471,9 @@ public:
 
 
 private:
+    /**
+     * @brief Rehydrate a prior PowerShell session if snapshot metadata exists.
+     */
     void restoreFromSnapshot_(const std::string& restoreScriptPath,
                              const std::string& snapshotPath);
 
@@ -460,25 +484,70 @@ private:
      * @param isErr True if the chunk came from stderr, false if from stdout
      * @param sv    String view of the data
      */
+    /**
+     * @brief Route a raw stdout/stderr chunk received from the process.
+     */
     void onChunk_(bool isErr, std::string_view sv);
+    /**
+     * @brief Buffer a chunk for later readOutput/readError calls.
+     */
     void enqueueStreamChunk_(bool isErr, std::string_view chunk);
+    /**
+     * @brief Apply stderr-specific handling (sentinels, ordering) while holding the lock.
+     */
     void handleErrorChunk_(std::unique_lock<std::mutex>& lk, std::string_view chunk);
+    /**
+     * @brief Apply stdout-specific handling while holding the lock.
+     */
     void handleOutputChunk_(std::unique_lock<std::mutex>& lk, std::string_view chunk);
+    /**
+     * @brief Ensure we have registered command metadata before processing output.
+     */
     bool ensureCommandBegan_(uint64_t id, CmdState& state, std::string& carry);
+    /**
+     * @brief Attempt to resolve a command result once its sentinel is detected.
+     */
     bool tryFinalizeCommand_(uint64_t id, CmdState& state, std::string& carry, std::string& nextCarry);
+    /**
+     * @brief Remove timeout sentinel tokens emitted on stderr when applicable.
+     */
     bool stripTimeoutSentinel_(std::string& chunk, CmdState* state);
+    /**
+     * @brief Remove a command state from the tracking map while the state mutex is held.
+     */
     std::unique_ptr<CmdState> eraseStateLocked_(uint64_t id);
     
+    /**
+     * @brief Produce a future that resolves to an immediate error result.
+     */
     std::future<ExecutionResult> makeErrorFuture_(int exitCode, std::string_view err) const;
+    /**
+     * @brief Allocate a new unique command identifier.
+     */
     uint64_t nextCommandId_();
+    /**
+     * @brief Create command bookkeeping structures for submission.
+     */
     std::unique_ptr<CmdState> createCmdState_(uint64_t id,
                                               double timeoutSeconds,
                                               std::function<void(const ExecutionResult&)> cb);
+    /**
+     * @brief Register a command state (stateMx_ must already be locked).
+     */
     void registerCmdStateLocked_(uint64_t id, std::unique_ptr<CmdState> state);
+    /**
+     * @brief Undo state changes when enqueueing a command fails midway.
+     */
     void handleEnqueueFailure_(uint64_t id);
 
+    /**
+     * @brief Finalise a command and fulfil its future while stateMx_ is locked.
+     */
     void completeCmdLocked_(CmdState& S, bool success);
 
+    /**
+     * @brief Send one-time initial commands into the PowerShell session (encoding, etc.).
+     */
     bool sendInitialCommands_();
 
     /**

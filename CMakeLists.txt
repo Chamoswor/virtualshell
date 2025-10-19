@@ -35,7 +35,7 @@ else()
   set(_VS_OUTDIR "${SKBUILD_PLATLIB_DIR}/virtualshell")
 endif()
 
-pybind11_add_module(_core MODULE ${SRC})
+pybind11_add_module(_core MODULE ${SRC} cpp/include/py_bridge.hpp)
 target_include_directories(_core PRIVATE cpp/include)
 
 if(UNIX)

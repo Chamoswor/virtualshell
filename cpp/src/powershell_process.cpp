@@ -66,6 +66,7 @@ void cancel_io_if_available(HANDLE handle) {
         return;
     }
     using Fn = BOOL(WINAPI*)(HANDLE, LPOVERLAPPED);
+    // Look up CancelIoEx dynamically so we still run on older Windows builds that lack it.
     static Fn fn = reinterpret_cast<Fn>(
         ::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"), "CancelIoEx"));
     if (fn) {
@@ -380,6 +381,7 @@ std::string PowerShellProcess::build_command_line_() const {
     args.emplace_back("-");
     args.insert(args.end(), config_.additional_arguments.begin(), config_.additional_arguments.end());
 
+    // Compose a Windows-friendly command line by quoting each argument as needed.
     std::string command_line;
     bool first = true;
     for (const auto& arg : args) {
@@ -465,6 +467,7 @@ bool PowerShellProcess::spawn_child_() {
 
     process_info_ = pi;
 
+    // Close inherited ends in the parent so only the child keeps them open.
     if (stdin_read_) {
         CloseHandle(stdin_read_);
         stdin_read_ = nullptr;
@@ -506,6 +509,7 @@ bool PowerShellProcess::write_pipe_(HANDLE handle, std::string_view data) {
         return false;
     }
 
+    // Write until all bytes are delivered or the pipe breaks.
     const char* ptr = data.data();
     std::size_t remaining = data.size();
     while (remaining > 0) {
@@ -537,6 +541,7 @@ bool PowerShellProcess::spawn_child_() {
     }
 
     if (child_pid_ == 0) {
+        // Child: wire up pipes and exec PowerShell.
         dup2(stdin_pipe_[0], STDIN_FILENO);
         dup2(stdout_pipe_[1], STDOUT_FILENO);
         dup2(stderr_pipe_[1], STDERR_FILENO);
@@ -579,6 +584,7 @@ bool PowerShellProcess::spawn_child_() {
         _exit(127);
     }
 
+    // Parent: close pipe ends that belong to the child process.
     close(stdin_pipe_[0]);
     stdin_pipe_[0] = -1;
     close(stdout_pipe_[1]);
@@ -611,6 +617,7 @@ bool PowerShellProcess::write_fd_(int fd, std::string_view data) {
         return false;
     }
 
+    // Write the entire buffer, retrying on EINTR/EAGAIN to accommodate pipes.
     const char* ptr = data.data();
     std::size_t remaining = data.size();
     while (remaining > 0) {

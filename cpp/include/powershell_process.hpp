@@ -25,15 +25,27 @@
 namespace virtualshell {
 namespace core {
 
+/**
+ * @brief Runtime configuration for launching the PowerShell host process.
+ */
 struct ProcessConfig {
-    std::string powershell_path{"pwsh"};
-    std::string working_directory{};
-    std::map<std::string, std::string> environment{};
-    std::vector<std::string> additional_arguments{};
+    std::string powershell_path{"pwsh"};          ///< Executable to launch (pwsh or powershell)
+    std::string working_directory{};               ///< Working directory passed to CreateProcess/posix_spawn
+    std::map<std::string, std::string> environment{}; ///< Extra environment variables for the child
+    std::vector<std::string> additional_arguments{};  ///< Additional command-line arguments appended verbatim
 };
 
+/**
+ * @brief Small RAII wrapper around the low-level PowerShell child process.
+ *
+ * This class encapsulates pipe setup, cross-platform spawning, and safe
+ * teardown. It exposes a Process interface consumed by VirtualShell or tests.
+ */
 class PowerShellProcess final : public Process {
 public:
+    /**
+     * @brief Construct with the given process configuration snapshot.
+     */
     explicit PowerShellProcess(ProcessConfig config);
     ~PowerShellProcess() override;
 
@@ -42,38 +54,98 @@ public:
     PowerShellProcess(PowerShellProcess&&) = delete;
     PowerShellProcess& operator=(PowerShellProcess&&) = delete;
 
+    /**
+     * @brief Launch the PowerShell process (idempotent when already running).
+     */
     bool start();
+    /**
+     * @brief Terminate the child process immediately, closing pipes.
+     */
     void terminate();
+    /**
+     * @brief Check whether the process is currently alive.
+     */
     bool is_alive() const noexcept;
 
+    /**
+     * @brief Write bytes to the child stdin pipe.
+     */
     bool write(std::string_view data) override;
+    /**
+     * @brief Read pending data from stdout (non-blocking, returns nullopt when empty).
+     */
     std::optional<std::string> read_stdout() override;
+    /**
+     * @brief Read pending data from stderr (non-blocking, returns nullopt when empty).
+     */
     std::optional<std::string> read_stderr() override;
+    /**
+     * @brief Close stdin/stdout/stderr pipes so the child can exit gracefully.
+     */
     void shutdown_streams() override;
 
 #ifdef _WIN32
+    /**
+     * @brief Access the native process handle for integration with Windows facilities.
+     */
     HANDLE native_process_handle() const noexcept { return process_info_.hProcess; }
 #else
+    /**
+     * @brief Access the child pid for integration with POSIX facilities.
+     */
     pid_t native_pid() const noexcept { return child_pid_; }
 #endif
 
 private:
+    /**
+     * @brief Spawn the PowerShell process using the configured options.
+     */
     bool spawn_child_();
+    /**
+     * @brief Allocate and configure stdin/stdout/stderr pipes.
+     */
     bool create_pipes_();
+    /**
+     * @brief Best-effort cleanup of pipe handles/descriptors.
+     */
     void close_pipes_() noexcept;
+    /**
+     * @brief Mark running_ false and clear bookkeeping after child exit.
+     */
     void mark_not_running_() noexcept;
 
 #ifdef _WIN32
+    /**
+     * @brief Read from a Windows HANDLE pipe into a string (non-blocking).
+     */
     std::optional<std::string> read_pipe_(HANDLE& handle);
+    /**
+     * @brief Write a string_view to a Windows pipe HANDLE.
+     */
     bool write_pipe_(HANDLE handle, std::string_view data);
 #else
+    /**
+     * @brief Read from a POSIX file descriptor into a string (non-blocking).
+     */
     std::optional<std::string> read_fd_(int& fd);
+    /**
+     * @brief Write a string_view to a POSIX file descriptor.
+     */
     bool write_fd_(int fd, std::string_view data);
 #endif
 
+    /**
+     * @brief Build the full command line passed to PowerShell.
+     */
     std::string build_command_line_() const;
 #ifdef _WIN32
+    /**
+     * @brief Create a Windows environment block for CreateProcessW.
+     */
     std::vector<wchar_t> build_environment_block_wide_() const;
+    /**
+     * @brief Convert UTF-8 to UTF-16 wide strings for Windows APIs.
+     */
     std::wstring to_wide_(const std::string& value) const;
 #endif
 

@@ -28,15 +28,30 @@ static constexpr size_t MAX_EXCLUDED_TAGS = 16;
 
 namespace virtualshell {
 namespace dev {
-// Thread-safe, lightweight file logger (lazy-open).
+
+/**
+ * @brief Thread-safe, lazily-opened file logger for development diagnostics.
+ *
+ * Controlled through environment variables (VIRTUALSHELL_DEBUG, etc.) and safe
+ * to call from multiple threads. Designed for lightweight instrumentation
+ * without pulling in an external logging dependency.
+ */
 class Logger {
 public:
+    /**
+     * @brief Obtain the singleton logger instance.
+     */
     static Logger& instance() {
         static Logger inst;
         return inst;
     }
 
-    // Enable/disable at runtime. If path empty, uses default "virtualshell_debug.log".
+    /**
+     * @brief Enable or disable logging at runtime.
+     *
+     * When enabling, optionally override the output path. If left empty the
+     * default "virtualshell_debug.log" in the current working directory is used.
+     */
     void enable(bool on, std::string path = {}) {
         std::lock_guard<std::mutex> lk(mx_);
         enabled_.store(on, std::memory_order_relaxed);
@@ -48,9 +63,14 @@ public:
         }
     }
 
+    /**
+     * @brief Query whether logging is currently enabled.
+     */
     bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
 
-    // printf-style logging with timestamp and thread id.
+    /**
+     * @brief Log a formatted message with UTC timestamp and thread id.
+     */
     void logf(const char* tag, const char* fmt, ...) {
         if (!enabled()) return;
         std::lock_guard<std::mutex> lk(mx_);
@@ -122,6 +142,9 @@ private:
     std::array<std::string, MAX_EXCLUDED_TAGS> excluded_tags_{};
     size_t excluded_count_{0};
 
+    /**
+     * @brief Append a tag to the exclusion list, bounded by MAX_EXCLUDED_TAGS.
+     */
     void add_excluded_tag_(const char* start, const char* end) {
         if (excluded_count_ >= excluded_tags_.size()) return;
         const size_t len = static_cast<size_t>(end - start);
@@ -130,6 +153,9 @@ private:
     }
 
 
+    /**
+     * @brief Parse comma-separated exclusions from the environment variable.
+     */
     bool set_excluded_tags_(const char* env_excl) {
         excluded_tags_.fill({});
         excluded_count_ = 0;
@@ -148,6 +174,9 @@ private:
         return excluded_count_ > 0;
     }
 
+    /**
+     * @brief Check whether a given tag should be skipped.
+     */
     bool is_excluded_(const char* tag) const {
         if (!tag) return false;
         for (size_t i = 0; i < excluded_count_; ++i) {
@@ -156,6 +185,9 @@ private:
         return false;
     }
 
+    /**
+     * @brief Open the log file using the current path (mutex must be held).
+     */
     void open_nolock_() {
         if (fh_) return;
         if (path_.empty()) path_ = "virtualshell_debug.log";
@@ -169,6 +201,9 @@ private:
             std::fflush(fh_);
         }
     }
+    /**
+     * @brief Close the log file and reset state (mutex must be held).
+     */
     void close_nolock_() {
         if (fh_) {
             std::fprintf(fh_, "----- VirtualShell debug stop ------\n");

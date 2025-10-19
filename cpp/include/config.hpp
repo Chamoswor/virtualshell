@@ -6,17 +6,20 @@
 
 namespace virtualshell {
 namespace core {
+/**
+ * @brief Runtime configuration supplied to the VirtualShell engine.
+ */
 struct Config {
-	std::string powershellPath{"pwsh"};     ///< Path to the PowerShell executable
-	std::string workingDirectory{""};       ///< Working directory (empty = current directory)
-	bool captureOutput{true};               ///< Capture stdout
-	bool captureError{true};                ///< Capture stderr
-	bool autoRestartOnTimeout{true};        ///< If true, restart the process on command timeout
-	int  timeoutSeconds{30};                ///< Default per-command timeout (seconds)
-	std::map<std::string, std::string> environment;   ///< Extra environment variables
-	std::vector<std::string> initialCommands;         ///< Commands to run right after startup
-	std::string restoreScriptPath{""};       ///< Optional path to get-session.ps1
-	std::string sessionSnapshotPath{""};     ///< Optional path to session_{RUN-ID}.xml
+	std::string powershellPath{"pwsh"};     ///< Absolute or relative path to the PowerShell executable
+	std::string workingDirectory{""};       ///< Working directory for the child process (empty = current)
+	bool captureOutput{true};               ///< Capture stdout content produced by commands
+	bool captureError{true};                ///< Capture stderr content produced by commands
+	bool autoRestartOnTimeout{true};        ///< Restart the backing process when a command times out
+	int  timeoutSeconds{30};                ///< Default per-command timeout (seconds, 0 disables)
+	std::map<std::string, std::string> environment;   ///< Additional environment variables merged into the child
+	std::vector<std::string> initialCommands;         ///< Commands executed immediately after start/ restart
+	std::string restoreScriptPath{""};       ///< Optional path to a restore script invoked after start
+	std::string sessionSnapshotPath{""};     ///< Optional path where session snapshots are persisted
 };
 } // namespace core
 } // namespace virtualshell
