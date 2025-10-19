@@ -1,4 +1,3 @@
-def on_done(result):
 # virtualshell
 
 High-performance PowerShell automation for Python. `virtualshell` keeps a single PowerShell host warm and exposes it through a thin Python wrapper backed by a C++ engine. The result: millisecond-scale latency, async execution, and session persistence without juggling subprocesses.
