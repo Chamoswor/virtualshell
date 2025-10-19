@@ -2,7 +2,7 @@
 
 High-performance PowerShell automation for Python. `virtualshell` keeps a single PowerShell host warm and exposes it through a thin Python wrapper backed by a C++ engine. The result: millisecond-scale latency, async execution, and session persistence without juggling subprocesses.
 
-> Full documentation now lives in the [project wiki](docs/wiki). This README gives you the essentials and quick links.
+> Full documentation now lives in the [project wiki](wiki). This README gives you the essentials and quick links.
 
 ---
 
@@ -92,7 +92,6 @@ Every API surface (sync/async/script) accepts `timeout` overrides and optional e
 | `Shell.script_async(...)` | Async counterpart of `script`. |
 | `Shell.save_session()` | Persist the current session to an XML snapshot. |
 | `Shell.pwsh(text)` | Safely echo a literal PowerShell string (auto quoting). |
-| `Shell.set_environment_variable(name, value)` | Mutate the child process environment. |
 
 More helpers live in the wiki, including session restore, batching, and diagnostic tips.
 
