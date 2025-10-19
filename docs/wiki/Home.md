@@ -8,6 +8,3 @@
 - Futures‑based async with optional callbacks
 - Timeouts and automatic restart of the backend process (opt‑in)
 - Typed error translation (timeout/error) and simple success checks
-
-**Navigation**
-- [[Getting Started]] · [[Quickstart]] · [[API Overview]] · [[Synchronous Execution]] · [[Asynchronous Execution]] · [[Running Scripts]] · [[Error Handling]] · [[Security Notes]] · [[Troubleshooting]]
