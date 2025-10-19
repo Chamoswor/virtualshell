@@ -113,7 +113,7 @@ PYBIND11_MODULE(_core, m) {
              py::arg("timeout_seconds") = 0.0,
              "Execute a PowerShell command asynchronously and return a Python Future")
 
-        // Async: batch (snake_case) + camelCase alias
+        // Async: batch
         .def("execute_async_batch",
              [](std::shared_ptr<VirtualShell> self,
                 std::vector<std::string> commands,
