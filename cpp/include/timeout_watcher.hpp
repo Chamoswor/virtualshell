@@ -7,6 +7,8 @@
 #include <chrono>
 #include <memory>
 #include <functional>
+#include <algorithm>
+#include <cstdint> // for uint64_t
 
 #include "cmd_state.hpp"
 
