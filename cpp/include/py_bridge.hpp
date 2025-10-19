@@ -288,7 +288,7 @@ py::object make_py_future_from_std_future(std::future<T> fut, py::object py_call
         }
 
         // Fulfil on the Python dispatcher (GIL held there).
-        PyDispatcher::inst().post([py_fut_ptr, cb_ptr, ok, err, value_sp]() mutable {  // <-- ENDRET capture
+        PyDispatcher::inst().post([py_fut_ptr, cb_ptr, ok, err, value_sp]() mutable {
             if (interpreter_down()) return;
             py::gil_scoped_acquire gil;
             py::object fut = *py_fut_ptr;
@@ -303,7 +303,7 @@ py::object make_py_future_from_std_future(std::future<T> fut, py::object py_call
                         fut.attr("set_result")(py::none());
                         if (cb_ptr) { try { (*cb_ptr)(py::none()); } catch (py::error_already_set& e){ e.discard_as_unraisable("py_callback"); } }
                     } else {
-                        py::object py_res = py::cast(*value_sp);     // <-- ENDRET
+                        py::object py_res = py::cast(*value_sp);
                         fut.attr("set_result")(py_res);
                         if (cb_ptr) { try { (*cb_ptr)(py_res); } catch (py::error_already_set& e){ e.discard_as_unraisable("py_callback"); } }
                     }

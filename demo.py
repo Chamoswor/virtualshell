@@ -152,10 +152,9 @@ def example_progress_monitoring():
             #     print(f"  All results count: {len(progress.allResults)}")
         
         print("Starting batch execution with progress monitoring...")
-        future = sh.run_async_batch(
+        future = sh.run_async(
             commands, 
-            progress=progress_callback,
-            stop_on_first_error=False
+            callback=progress_callback
         )
         
         # Do other work while monitoring progress
