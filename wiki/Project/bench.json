@@ -1,0 +1,435 @@
+{
+  "env": {
+    "timestamp": "2025-10-19T16:54:58.635643Z",
+    "python": "3.13.5",
+    "executable": "...\\.venv\\Scripts\\python.exe",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 60 Stepping 3, GenuineIntel",
+    "impl": "CPython"
+  },
+  "config": {
+    "sizes": [
+      50,
+      100,
+      200
+    ],
+    "batch_repeats": 3,
+    "async_n": 50,
+    "cmd": "$x=1+1; $x | Out-Null",
+    "types": true,
+    "timeout": 30.0,
+    "num_shells": 0,
+    "cmds_per_shell": 50,
+    "json_out": "bench.json",
+    "csv_out": "bench.csv"
+  },
+  "per_size": {
+    "50": {
+      "single": {
+        "name": "single_sequential",
+        "n": 50,
+        "mean_ms": 4.040618000017275,
+        "stdev_ms": 1.4378831461855945,
+        "p50_ms": 3.5427000002528075,
+        "p95_ms": 8.343100000274717,
+        "p99_ms": 10.824000000866363,
+        "total_s": 0.20218279999971855,
+        "throughput_cmds_per_s": 247.30095735181035,
+        "failures": 0
+      },
+      "batch": {
+        "name": "batch_wall_time",
+        "n": 3,
+        "mean_ms": 169.35379999995348,
+        "stdev_ms": 2.84148708002083,
+        "p50_ms": 167.70379999979923,
+        "p95_ms": 173.35199999979523,
+        "p99_ms": 173.35199999979523,
+        "batches": 3,
+        "batch_size": 50,
+        "total_cmds": 150,
+        "total_wall_s": 0.5080613999998604,
+        "per_batch_mean_s": 0.16935379999995348,
+        "per_cmd_mean_s": 0.0033870759999990695,
+        "throughput_cmds_per_s": 295.2399060429334,
+        "failures": 0,
+        "verified_last_batch_count": 50
+      },
+      "async": {
+        "name": "async_single_shell_latency",
+        "n": 50,
+        "mean_ms": 2.35876,
+        "stdev_ms": 0.3056627873981391,
+        "p50_ms": 2.2848,
+        "p95_ms": 2.6719,
+        "p99_ms": 3.9213,
+        "wall_time_s": 0.17029569999976957,
+        "throughput_cmds_per_s": 293.6069436871727,
+        "submitted_n": 50,
+        "completed_n": 50,
+        "failures": 0
+      },
+      "types": {
+        "simple_echo": {
+          "name": "simple_echo",
+          "n": 10,
+          "mean_ms": 10.74599000003218,
+          "stdev_ms": 22.109285826092126,
+          "p50_ms": 3.413100000216218,
+          "p95_ms": 77.07109999955719,
+          "p99_ms": 77.07109999955719,
+          "per_cmd_mean_s": 0.01074599000003218,
+          "est_throughput_cmds_per_s": 93.05796860010156
+        },
+        "math_operation": {
+          "name": "math_operation",
+          "n": 10,
+          "mean_ms": 3.698339999846212,
+          "stdev_ms": 0.2732965393427688,
+          "p50_ms": 3.6789999994653044,
+          "p95_ms": 4.26919999972597,
+          "p99_ms": 4.26919999972597,
+          "per_cmd_mean_s": 0.003698339999846212,
+          "est_throughput_cmds_per_s": 270.39158109897494
+        },
+        "get_date": {
+          "name": "get_date",
+          "n": 10,
+          "mean_ms": 5.777500000021973,
+          "stdev_ms": 5.5897221796922585,
+          "p50_ms": 3.9090999998734333,
+          "p95_ms": 22.5414999995337,
+          "p99_ms": 22.5414999995337,
+          "per_cmd_mean_s": 0.005777500000021973,
+          "est_throughput_cmds_per_s": 173.08524448224955
+        },
+        "file_operation": {
+          "name": "file_operation",
+          "n": 10,
+          "mean_ms": 15.46890000008716,
+          "stdev_ms": 18.04393471599393,
+          "p50_ms": 9.176499999739463,
+          "p95_ms": 69.53390000035142,
+          "p99_ms": 69.53390000035142,
+          "per_cmd_mean_s": 0.01546890000008716,
+          "est_throughput_cmds_per_s": 64.64583777737043
+        },
+        "variable_assignment": {
+          "name": "variable_assignment",
+          "n": 10,
+          "mean_ms": 4.219979999925272,
+          "stdev_ms": 1.3208599508633982,
+          "p50_ms": 3.6196999999447144,
+          "p95_ms": 7.719899999756308,
+          "p99_ms": 7.719899999756308,
+          "per_cmd_mean_s": 0.0042199799999252715,
+          "est_throughput_cmds_per_s": 236.9679477195883
+        },
+        "_total": {
+          "mixed_wall_time_s": 0.3992670999996335,
+          "iterations": 10,
+          "types": [
+            "simple_echo",
+            "math_operation",
+            "get_date",
+            "file_operation",
+            "variable_assignment"
+          ]
+        }
+      },
+      "efficiency": {
+        "batch_efficiency": 1.192951678680486,
+        "async_efficiency": 1.1863535015924485
+      }
+    },
+    "100": {
+      "single": {
+        "name": "single_sequential",
+        "n": 100,
+        "mean_ms": 3.7540429999626213,
+        "stdev_ms": 0.9985404314703489,
+        "p50_ms": 3.5565999996833852,
+        "p95_ms": 4.314200000408164,
+        "p99_ms": 5.728199999794015,
+        "total_s": 0.3757066999996823,
+        "throughput_cmds_per_s": 266.16506972083425,
+        "failures": 0
+      },
+      "batch": {
+        "name": "batch_wall_time",
+        "n": 3,
+        "mean_ms": 368.46003333327343,
+        "stdev_ms": 11.631880336688416,
+        "p50_ms": 372.9253000001336,
+        "p95_ms": 379.9386000000595,
+        "p99_ms": 379.9386000000595,
+        "batches": 3,
+        "batch_size": 100,
+        "total_cmds": 300,
+        "total_wall_s": 1.1053800999998202,
+        "per_batch_mean_s": 0.36846003333327343,
+        "per_cmd_mean_s": 0.0036846003333327344,
+        "throughput_cmds_per_s": 271.39985603146715,
+        "failures": 0,
+        "verified_last_batch_count": 100
+      },
+      "async": {
+        "name": "async_single_shell_latency",
+        "n": 50,
+        "mean_ms": 2.246812,
+        "stdev_ms": 0.18952675340436767,
+        "p50_ms": 2.1917,
+        "p95_ms": 2.5633,
+        "p99_ms": 2.9163,
+        "wall_time_s": 0.16433099999994738,
+        "throughput_cmds_per_s": 304.26395506639653,
+        "submitted_n": 50,
+        "completed_n": 50,
+        "failures": 0
+      },
+      "types": {
+        "simple_echo": {
+          "name": "simple_echo",
+          "n": 20,
+          "mean_ms": 3.227405000006911,
+          "stdev_ms": 0.2926366065619127,
+          "p50_ms": 3.2554000008531148,
+          "p95_ms": 3.538299999490846,
+          "p99_ms": 4.0053000002444605,
+          "per_cmd_mean_s": 0.003227405000006911,
+          "est_throughput_cmds_per_s": 309.8464555882694
+        },
+        "math_operation": {
+          "name": "math_operation",
+          "n": 20,
+          "mean_ms": 3.5607999998774176,
+          "stdev_ms": 0.44443949757389223,
+          "p50_ms": 3.5717999999178573,
+          "p95_ms": 4.340800000136369,
+          "p99_ms": 4.6210999998947955,
+          "per_cmd_mean_s": 0.0035607999998774177,
+          "est_throughput_cmds_per_s": 280.835767252984
+        },
+        "get_date": {
+          "name": "get_date",
+          "n": 20,
+          "mean_ms": 3.9538600000014417,
+          "stdev_ms": 0.5593835011830618,
+          "p50_ms": 3.7739999997938867,
+          "p95_ms": 5.2005000006829505,
+          "p99_ms": 5.55759999951988,
+          "per_cmd_mean_s": 0.003953860000001442,
+          "est_throughput_cmds_per_s": 252.91740223468597
+        },
+        "file_operation": {
+          "name": "file_operation",
+          "n": 20,
+          "mean_ms": 9.07568499987974,
+          "stdev_ms": 0.7775919176372127,
+          "p50_ms": 9.159600000202772,
+          "p95_ms": 10.174699999879522,
+          "p99_ms": 10.987099999510974,
+          "per_cmd_mean_s": 0.00907568499987974,
+          "est_throughput_cmds_per_s": 110.18452050872753
+        },
+        "variable_assignment": {
+          "name": "variable_assignment",
+          "n": 20,
+          "mean_ms": 3.461580000066533,
+          "stdev_ms": 0.35916401483087695,
+          "p50_ms": 3.436499999224907,
+          "p95_ms": 4.173899999841524,
+          "p99_ms": 4.238499999701162,
+          "per_cmd_mean_s": 0.0034615800000665333,
+          "est_throughput_cmds_per_s": 288.8854222582692
+        },
+        "_total": {
+          "mixed_wall_time_s": 0.46593140000004496,
+          "iterations": 20,
+          "types": [
+            "simple_echo",
+            "math_operation",
+            "get_date",
+            "file_operation",
+            "variable_assignment"
+          ]
+        }
+      },
+      "efficiency": {
+        "batch_efficiency": 1.0188467297257926,
+        "async_efficiency": 1.1422199706579474
+      }
+    },
+    "200": {
+      "single": {
+        "name": "single_sequential",
+        "n": 200,
+        "mean_ms": 3.4758784999939962,
+        "stdev_ms": 0.4702681112691463,
+        "p50_ms": 3.3659000000625383,
+        "p95_ms": 4.410900000038964,
+        "p99_ms": 4.873200000474753,
+        "total_s": 0.6957689000000755,
+        "throughput_cmds_per_s": 287.4517673899743,
+        "failures": 0
+      },
+      "batch": {
+        "name": "batch_wall_time",
+        "n": 3,
+        "mean_ms": 640.5526333334516,
+        "stdev_ms": 19.112913325858703,
+        "p50_ms": 645.6326999996236,
+        "p95_ms": 661.0039000006509,
+        "p99_ms": 661.0039000006509,
+        "batches": 3,
+        "batch_size": 200,
+        "total_cmds": 600,
+        "total_wall_s": 1.9216579000003549,
+        "per_batch_mean_s": 0.6405526333334516,
+        "per_cmd_mean_s": 0.003202763166667258,
+        "throughput_cmds_per_s": 312.23039230858376,
+        "failures": 0,
+        "verified_last_batch_count": 200
+      },
+      "async": {
+        "name": "async_single_shell_latency",
+        "n": 50,
+        "mean_ms": 1.93793,
+        "stdev_ms": 0.2302616461766918,
+        "p50_ms": 1.8464,
+        "p95_ms": 2.4486999999999997,
+        "p99_ms": 2.5106,
+        "wall_time_s": 0.14340810000066995,
+        "throughput_cmds_per_s": 348.65534094494257,
+        "submitted_n": 50,
+        "completed_n": 50,
+        "failures": 0
+      },
+      "types": {
+        "simple_echo": {
+          "name": "simple_echo",
+          "n": 20,
+          "mean_ms": 3.164429999969798,
+          "stdev_ms": 0.3371432931524408,
+          "p50_ms": 3.184000000146625,
+          "p95_ms": 3.743600000234437,
+          "p99_ms": 3.8522000004377333,
+          "per_cmd_mean_s": 0.003164429999969798,
+          "est_throughput_cmds_per_s": 316.01267843167466
+        },
+        "math_operation": {
+          "name": "math_operation",
+          "n": 20,
+          "mean_ms": 3.467485000101078,
+          "stdev_ms": 0.4091441996840719,
+          "p50_ms": 3.4618999998201616,
+          "p95_ms": 4.093499999726191,
+          "p99_ms": 4.522499999438878,
+          "per_cmd_mean_s": 0.003467485000101078,
+          "est_throughput_cmds_per_s": 288.3934609582593
+        },
+        "get_date": {
+          "name": "get_date",
+          "n": 20,
+          "mean_ms": 3.6974749998989864,
+          "stdev_ms": 0.503173649713733,
+          "p50_ms": 3.6995000000388245,
+          "p95_ms": 4.454099999747996,
+          "p99_ms": 4.717399999208283,
+          "per_cmd_mean_s": 0.0036974749998989866,
+          "est_throughput_cmds_per_s": 270.4548374302246
+        },
+        "file_operation": {
+          "name": "file_operation",
+          "n": 20,
+          "mean_ms": 9.231075000161582,
+          "stdev_ms": 0.856825598295263,
+          "p50_ms": 9.203200000229117,
+          "p95_ms": 10.416699999950652,
+          "p99_ms": 10.644300000421936,
+          "per_cmd_mean_s": 0.00923107500016158,
+          "est_throughput_cmds_per_s": 108.32974490863697
+        },
+        "variable_assignment": {
+          "name": "variable_assignment",
+          "n": 20,
+          "mean_ms": 3.377755000110483,
+          "stdev_ms": 0.6568634125255325,
+          "p50_ms": 3.410000000258151,
+          "p95_ms": 3.7922000001344713,
+          "p99_ms": 5.752200000642915,
+          "per_cmd_mean_s": 0.003377755000110483,
+          "est_throughput_cmds_per_s": 296.0546279902749
+        },
+        "_total": {
+          "mixed_wall_time_s": 0.45916920000036043,
+          "iterations": 20,
+          "types": [
+            "simple_echo",
+            "math_operation",
+            "get_date",
+            "file_operation",
+            "variable_assignment"
+          ]
+        }
+      },
+      "efficiency": {
+        "batch_efficiency": 1.0852749076700972,
+        "async_efficiency": 1.2118836034986022
+      }
+    }
+  },
+  "persistence": {
+    "summary": {
+      "name": "session_save",
+      "n": 10,
+      "mean_ms": 302.08038000009765,
+      "stdev_ms": 99.5790133048913,
+      "p50_ms": 272.12520000011864,
+      "p95_ms": 593.6776999997164,
+      "p99_ms": 593.6776999997164
+    },
+    "raw": [
+      0.5936776999997164,
+      0.2945346000005884,
+      0.27212520000011864,
+      0.29009769999993296,
+      0.28838750000068103,
+      0.26491249999980937,
+      0.28663370000049326,
+      0.2681343000003835,
+      0.233488099999704,
+      0.2288124999995489
+    ]
+  },
+  "detailed": {
+    "startup_time_s": 0.32830340000055,
+    "command_overhead_s": 0.0030448000000357447,
+    "size_impact": [
+      [
+        10,
+        0.006778800000574847
+      ],
+      [
+        100,
+        0.0038510000003952882
+      ],
+      [
+        1000,
+        0.003522099999827333
+      ],
+      [
+        10000,
+        0.0035966000004918897
+      ]
+    ]
+  },
+  "parallel": {},
+  "assessment": {
+    "avg_batch_efficiency": 1.0990244386921253,
+    "avg_async_efficiency": 1.1801523585829994,
+    "command_overhead_s": 0.0030448000000357447,
+    "startup_time_s": 0.32830340000055
+  }
+}
