@@ -121,28 +121,6 @@ Configuration is applied before the process starts. You can inspect or replace i
 
 ---
 
-## Error handling
-
-```python
-from virtualshell import Shell
-from virtualshell.errors import ExecutionError, ExecutionTimeoutError
-
-shell = Shell().start()
-
-try:
-    shell.run("throw 'boom'", raise_on_error=True)
-except ExecutionTimeoutError:
-    print("Timed out")
-except ExecutionError as exc:
-    print("PowerShell failure:", exc)
-finally:
-    shell.stop()
-```
-
-Refer to `virtualshell.errors` for all exception types.
-
----
-
 ## Performance
 
 Up-to-date benchmark artefacts (`bench.json`, `bench.csv`) and analysis live in [docs/wiki/Project/Benchmarks.md](docs/wiki/Project/Benchmarks.md). Headline numbers from the latest run (Windows 11, Python 3.13):
