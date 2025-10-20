@@ -550,6 +550,8 @@ private:
      */
     bool sendInitialCommands_();
 
+    void removeNewlineFromQuoteEscape_(std::string& cmd);
+
     /**
      * @internal
      * @brief Wait for the PowerShell process to become ready or exit.

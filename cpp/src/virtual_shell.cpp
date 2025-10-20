@@ -9,6 +9,12 @@
 #include <array>
 #include <filesystem>
 #include <map>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 #if not defined(_WIN32)
 #include <sstream>
 #endif
@@ -26,6 +32,10 @@ constexpr auto DOT_SOURCE_PREFIX = ". ";
 constexpr auto NO_SOURCE_PREFIX  = "& ";
 
 static constexpr std::string_view INTERNAL_TIMEOUT_SENTINEL = "__VS_INTERNAL_TIMEOUT__";
+
+
+
+ // namespace
 
 VirtualShell::VirtualShell(const Config& config) : config(config) {
     // Store configuration; actual process startup is deferred until start().
@@ -1251,8 +1261,8 @@ void VirtualShell::completeCmdLocked_(CmdState& S, bool success) {
         r.exitCode = r.success ? 0 : -1;
     }
 
-    r.out   = std::move(S.outBuf);
-    r.err   = std::move(S.errBuf);
+    r.out   = virtualshell::helpers::normalizeToUtf8(std::move(S.outBuf));
+    r.err   = virtualshell::helpers::normalizeToUtf8(std::move(S.errBuf));
     if (interrupted && r.err.empty()) {
         r.err = "Process stopped.\n";
     }
@@ -1286,7 +1296,7 @@ void VirtualShell::fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSent
     ExecutionResult r{};
     r.success  = false;
     r.exitCode = -1;
-    r.err = st->errBuf.empty() ? std::string("timeout") : std::move(st->errBuf);
+    r.err = st->errBuf.empty() ? std::string("timeout") : virtualshell::helpers::normalizeToUtf8(std::move(st->errBuf));
 
     if (config.autoRestartOnTimeout) {
         VSHELL_DBG("TIMEOUT", "id=%llu scheduling forced restart", static_cast<unsigned long long>(st->id));
@@ -1299,7 +1309,6 @@ void VirtualShell::fulfillTimeout_(std::unique_ptr<CmdState> st, bool expectSent
     try { st->prom.set_value(r); } catch (...) {}
     if (st->cb) { try { st->cb(r); } catch (...) {} }
 }
-
 
 void VirtualShell::requestRestartAsync_(bool force) {
     auto weak = this->weak_from_this();
