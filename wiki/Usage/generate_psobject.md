@@ -75,7 +75,7 @@ with Shell(strip_results=True, timeout_seconds=60) as sh:
 	print(f"Downloaded data from {url}:\n{data[:100]}...")
 ```
 
-See the [`Make Proxy`](Make_Proxy.md) guide for full details on the proxy API and advanced options.
+See the [`make_proxy`](make_proxy.md) guide for full details on the proxy API and advanced options.
 
 ## Troubleshooting
 
