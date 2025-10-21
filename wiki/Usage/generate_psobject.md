@@ -61,13 +61,11 @@ Once you have generated a protocol (for example `WebClient.py`), you can attach 
 
 ```python
 from virtualshell import Shell
-from typing import cast
 from WebClient import WebClient
 
 with Shell(strip_results=True, timeout_seconds=60) as sh:
-	sh.run("$client = New-Object System.Net.WebClient")
-	proxy_cls = sh.make_proxy("WebClientProxy", "$client")
-	client = cast(WebClient, proxy_cls)
+	sh.run("$client = New-Object System.Net.WebClient") # create the object in PS
+	client: WebClient = sh.make_proxy("WebClientProxy", "$client") # type-hinted proxy
 
 	url = "https://www.example.com"
 	data = client.DownloadString(url)

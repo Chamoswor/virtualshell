@@ -37,14 +37,13 @@ with Shell(strip_results=True) as sh:
 Pair `make_proxy` with [`generate_psobject`](generate_psobject.md) to preserve type information:
 
 ```python
-from typing import cast
 from WebClient import WebClient  # generated protocol
 from virtualshell import Shell
 
 with Shell() as sh:
     sh.run("$client = New-Object System.Net.WebClient")
     proxy = sh.make_proxy("WebClientProxy", "$client")
-    client = cast(WebClient, proxy)
+    client: WebClient = proxy  # type checker now knows the shape
 
     print(client.BaseAddress)
 ```
