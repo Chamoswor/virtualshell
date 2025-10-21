@@ -330,6 +330,14 @@ std::string PsProxy::format_argument(py::handle value) const {
         return virtualshell::helpers::parsers::ps_quote(py::cast<std::string>(value));
     }
 
+    if (py::isinstance<py::int_>(value)) {
+        return py::cast<std::string>(py::str(value));
+    }
+
+    if (py::isinstance<py::float_>(value)) {
+        return py::cast<std::string>(py::str(value));
+    }
+
     if (py::hasattr(value, "_ps_literal")) {
         auto literal = value.attr("_ps_literal")();
         return py::cast<std::string>(py::str(literal));
@@ -368,50 +376,7 @@ std::string PsProxy::format_argument(py::handle value) const {
         return payload;
     }
 
-    throw py::type_error("Cannot convert argument to PowerShell literal");
-}
-
-py::object PsProxy::bind_method(const std::string& name, const MethodMeta& meta) {
-    auto objRef = "$" + objRef_;
-    auto formatter = [this](py::handle h) { return format_argument(h); };
-    auto result_name = typeName_ + "." + name;
-
-    return py::cpp_function(
-        [this,objRef, meta, formatter, result_name](py::args args, py::kwargs kwargs) -> py::object {
-            if (kwargs && kwargs.size() != 0) {
-                throw py::type_error("Proxy methods do not support keyword arguments");
-            }
-
-            std::vector<std::string> psArgs;
-            psArgs.reserve(args.size());
-            for (auto item : args) {
-                psArgs.emplace_back(formatter(item));
-            }
-
-            std::string command = objRef + "." + result_name.substr(result_name.find('.') + 1);
-            if (!psArgs.empty()) {
-                command.push_back('(');
-                for (std::size_t i = 0; i < psArgs.size(); ++i) {
-                    if (i) command.append(", ");
-                    command.append(psArgs[i]);
-                }
-                command.push_back(')');
-            } else {
-                command.append("()");
-            }
-
-            if ( meta.awaitable) {
-                command = "(" + command + ").GetAwaiter().GetResult()";
-            }
-
-            auto exec = shell_.execute(command);
-            if (!exec.success) {
-                throw py::value_error("PowerShell method '" + result_name + "' failed: " + exec.err);
-            }
-
-            return coerce_scalar(exec.out);
-        },
-        py::name(name.c_str()));
+    return py::cast<std::string>(py::str(value));
 }
 
 inline bool is_simple_ident(const std::string& s) {
@@ -447,8 +412,68 @@ inline std::string build_property_expr(const std::string& objRef_, const std::st
 }
 
 
+inline std::string build_method_invocation(const std::string& objRef_,
+                                           const std::string& name,
+                                           const std::vector<std::string>& args) {
+    std::string base;
+    if (is_simple_ident(name)) {
+        base = "$" + objRef_ + "." + name;
+    } else {
+        std::string escaped = escape_single_quotes(name);
+        base = "$" + objRef_ + ".PSObject.Methods['" + escaped + "'].Invoke";
+    }
+
+    std::string command;
+    std::size_t estimated = base.size() + 2; // account for "()"
+    for (const auto& arg : args) {
+        estimated += arg.size() + 2; // comma and space
+    }
+    command.reserve(estimated);
+    command.append(base);
+    command.push_back('(');
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (i) command.append(", ");
+        command.append(args[i]);
+    }
+    command.push_back(')');
+    return command;
+}
+
+
 inline void rstrip_newlines(std::string& s) {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+}
+
+py::object PsProxy::bind_method(const std::string& name, const MethodMeta& meta) {
+    auto formatter = [this](py::handle h) { return format_argument(h); };
+    auto result_name = typeName_ + "." + name;
+
+    return py::cpp_function(
+        [this, meta, formatter, result_name, name](py::args args, py::kwargs kwargs) -> py::object {
+            if (kwargs && kwargs.size() != 0) {
+                throw py::type_error("Proxy methods do not support keyword arguments");
+            }
+
+            std::vector<std::string> psArgs;
+            psArgs.reserve(args.size());
+            for (auto item : args) {
+                psArgs.emplace_back(formatter(item));
+            }
+
+            std::string command = build_method_invocation(objRef_, name, psArgs);
+
+            if ( meta.awaitable) {
+                command = "(" + command + ").GetAwaiter().GetResult()";
+            }
+
+            auto exec = shell_.execute(command);
+            if (!exec.success) {
+                throw py::value_error("PowerShell method '" + result_name + "' failed: " + exec.err);
+            }
+
+            return coerce_scalar(exec.out);
+        },
+        py::name(name.c_str()));
 }
 
 py::object PsProxy::read_property(const std::string& name) const {
