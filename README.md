@@ -82,6 +82,39 @@ Every API surface (sync/async/script) accepts `timeout` overrides and optional e
 
 ---
 
+## PowerShell object proxies
+
+`Shell.generate_psobject` reflects a PowerShell object into a Python `Protocol`, while `Shell.make_proxy` creates a live proxy that forwards attribute access back into PowerShell. Together they give you IDE-friendly, type-hinted automation.
+
+```python
+from typing import cast
+from virtualshell import Shell
+from StreamWriter import StreamWriter  # generated via Shell().generate_psobject
+from StreamReader import StreamReader
+
+with Shell(strip_results=True, timeout_seconds=60) as sh:
+    sh.run("$writer = New-Object System.IO.StreamWriter('test.txt')")
+    proxy_writer = sh.make_proxy("StreamWriterProxy", "$writer")
+    writer = cast(StreamWriter, proxy_writer)
+
+    writer.WriteLine("Test Line 1!")
+    writer.WriteLine("Test Line 2!")
+    writer.WriteLine("Test Line 3!")
+    writer.Flush()
+    writer.Close()
+
+    sh.run("$reader = New-Object System.IO.StreamReader('test.txt')")
+    proxy_reader = sh.make_proxy("StreamReaderProxy", "$reader")
+    reader = cast(StreamReader, proxy_reader)
+
+    while not reader.EndOfStream:
+        print(f"Read: {reader.ReadLine()}")
+```
+
+Detailed guides live in the wiki: [generate_psobject](wiki/Usage/generate_psobject.md) and [make_proxy](wiki/Usage/make_proxy.md).
+
+---
+
 ## Core API overview
 
 | Method | Purpose |
