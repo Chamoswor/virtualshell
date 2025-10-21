@@ -1,7 +1,20 @@
 #pragma once
-#if not defined(_WIN32)
+
+#include <string>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sstream>
 #endif
+
+#include <limits>
 
 
 /**
@@ -61,7 +74,7 @@ static inline std::string ps_quote(const std::string& s) {
 } // namespace parsers
 
 #ifdef _WIN32
-bool isValidUtf8(const std::string& data) {
+inline bool isValidUtf8(const std::string& data) {
     const unsigned char* ptr = reinterpret_cast<const unsigned char*>(data.data());
     size_t len = data.size();
     size_t i = 0;
@@ -94,7 +107,7 @@ bool isValidUtf8(const std::string& data) {
     return true;
 }
 
-std::string latin1Fallback(const std::string& payload) {
+inline std::string latin1Fallback(const std::string& payload) {
     std::string out;
     out.reserve(payload.size() * 2);
     for (unsigned char c : payload) {

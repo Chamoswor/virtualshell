@@ -19,13 +19,6 @@
 #include <sstream>
 #endif
 
-// Convenience macro (keeps callsites short)
-// Enable by defining VIRTUALSHELL_DEBUG=1 in the environment
-// Optionally set VIRTUALSHELL_DEBUG_PATH=<path> to specify log file location
-#define VSHELL_DBG(TAG, FMT, ...) \
-    do { if (virtualshell::dev::Logger::instance().enabled()) \
-        virtualshell::dev::Logger::instance().logf(TAG, FMT, ##__VA_ARGS__); } while(0)
-
 namespace fs = std::filesystem;
 
 constexpr auto DOT_SOURCE_PREFIX = ". ";

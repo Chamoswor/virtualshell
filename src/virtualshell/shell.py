@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Dict, Optional, Callable, Any, Union, Protocol, TYPE_CHECKING, cast, overload, Sequence, TypeVar
 from concurrent.futures import Future
-
+from .generate_psobject import generate
 
 _CPP_MODULE: Any = None
 
@@ -485,6 +485,13 @@ class Shell:
             dot_source=False,
             raise_on_error=raise_on_error,
         )
+    
+    def make_proxy(self, type_name: str, obj_ref: str = "$obj") -> Any:
+        return self._core.make_proxy(type_name, obj_ref, 2)
+
+    def generate_psobject(self, command: str, output_path: Path) -> None:
+        """Generate a PowerShell object from a command."""
+        return generate(self, command, output_path)
 
     def pwsh(self, s: str, timeout: Optional[float] = None, raise_on_error: bool = False) -> ExecutionResult:
         """Execute a **literal** PowerShell string safely.

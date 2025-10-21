@@ -139,7 +139,9 @@ public:
     };
 
     
-
+    std::shared_ptr<VirtualShell> getSharedPtr() {
+        return shared_from_this();
+    }
 
     /**
      * @brief Construct a new VirtualShell with the given configuration.

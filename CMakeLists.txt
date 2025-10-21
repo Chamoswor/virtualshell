@@ -26,6 +26,7 @@ set(SRC
   cpp/src/io_pump.cpp
   cpp/src/powershell_process.cpp
   cpp/src/virtual_shell.cpp
+  cpp/src/py_proxy.cpp
 )
 
 # Output: site-packages/virtualshell (wheel) vs src/virtualshell (editable)
@@ -35,7 +36,12 @@ else()
   set(_VS_OUTDIR "${SKBUILD_PLATLIB_DIR}/virtualshell")
 endif()
 
-pybind11_add_module(_core MODULE ${SRC} cpp/include/py_bridge.hpp)
+set(REQ_PY
+  cpp/include/py_bridge.hpp
+  cpp/include/py_proxy.hpp
+)
+
+pybind11_add_module(_core MODULE ${SRC} ${REQ_PY})
 target_include_directories(_core PRIVATE cpp/include)
 
 if(UNIX)

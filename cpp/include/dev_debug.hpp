@@ -220,6 +220,13 @@ private:
 
 }} // namespace virtualshell::dev
 
+// Convenience macro (keeps callsites short)
+// Enable by defining VIRTUALSHELL_DEBUG=1 in the environment
+// Optionally set VIRTUALSHELL_DEBUG_PATH=<path> to specify log file location
+#define VSHELL_DBG(TAG, FMT, ...) \
+    do { if (virtualshell::dev::Logger::instance().enabled()) \
+        virtualshell::dev::Logger::instance().logf(TAG, FMT, ##__VA_ARGS__); } while(0)
+
 #if defined(_WIN32) && defined(__clang__)
   #pragma clang diagnostic pop
 #endif
