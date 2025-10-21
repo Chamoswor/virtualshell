@@ -62,6 +62,7 @@ GENERIC_COLLECTIONS: Dict[str, str] = {
 
 VARIABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 TYPE_LIKE_PATTERN = re.compile(r"^[A-Za-z0-9_\.\[\],`+]+$")
+SETTER_TOKEN_RE = re.compile(r"set\s*(?:;|\(|=)", re.IGNORECASE)
 
 
 def split_generic_arguments(text: str) -> List[str]:
@@ -272,6 +273,29 @@ def categorize_members(members: Iterable[MutableMapping[str, Any]]) -> Dict[str,
     return {"Methods": methods, "Properties": properties}
 
 
+def property_is_writable(entry: MutableMapping[str, Any]) -> bool:
+    setter = entry.get("SetMethod")
+    if setter not in (None, "", False):
+        return True
+
+    definition = entry.get("Definition")
+    texts: List[str] = []
+    if isinstance(definition, list):
+        texts.extend(str(item) for item in definition if isinstance(item, str))
+    elif isinstance(definition, str):
+        texts.append(definition)
+
+    for text in texts:
+        if SETTER_TOKEN_RE.search(text):
+            return True
+
+    member_type = entry.get("MemberType")
+    if isinstance(member_type, str) and member_type in {"NoteProperty", "AliasProperty"}:
+        return True
+
+    return False
+
+
 def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]) -> str:
     grouped = categorize_members(members)
     typing_bits: Set[str] = {"Protocol"}
@@ -285,6 +309,9 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
         runtime_bits.update(r_bits)
         prop_lines.append("    @property")
         prop_lines.append(f"    def {safe_name}(self) -> {annotation}: ...")
+        if property_is_writable(entry):
+            prop_lines.append(f"    @{safe_name}.setter")
+            prop_lines.append(f"    def {safe_name}(self, value: {annotation}) -> None: ...")
         prop_lines.append("")
 
     method_lines: List[str] = []
