@@ -80,4 +80,4 @@ See the [`Make Proxy`](Make_Proxy.md) guide for full details on the proxy API an
 - **Missing members:** `Get-Member` might exclude hidden members by default. Adjust your expression or extend the helper if you need additional metadata.
 - **Encoding issues:** Confirm that UTF-8 is set in the PowerShell session (the helper sets this automatically).
 
-By combining PowerShell introspection with Python protocols, `Generate_PSObject` offers a quick path to ergonomic, type-aware automation scripts.
+By combining PowerShell introspection with Python protocols, `generate_psobject` offers a quick path to ergonomic, type-aware automation scripts.
