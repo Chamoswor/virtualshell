@@ -123,7 +123,7 @@ Configuration is applied before the process starts. You can inspect or replace i
 
 ## Performance
 
-Up-to-date benchmark artefacts (`bench.json`, `bench.csv`) and analysis live in [docs/wiki/Project/Benchmarks.md](docs/wiki/Project/Benchmarks.md). Headline numbers from the latest run (Windows 11, Python 3.13):
+Up-to-date benchmark artefacts (`bench.json`, `bench.csv`) and analysis live in [wiki/Project/Benchmarks.md](wiki/Project/Benchmarks.md). Headline numbers from the latest run (Windows 11, Python 3.13):
 
 - Sequential commands: ~3.5 ms average
 - Batch commands: ~3.2 ms per command
