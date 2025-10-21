@@ -28,8 +28,8 @@ with Shell(strip_results=True) as sh:
     sh.run("$client = [System.Net.WebClient]::new()")
     client = sh.make_proxy("WebClientProxy", "$client")
 
-content = client.DownloadString("https://www.example.com")
-print(content[:120])
+    content = client.DownloadString("https://www.example.com")
+    print(content[:120])
 ```
 
 ## Integrating with Generated Protocols
@@ -46,7 +46,7 @@ with Shell() as sh:
     proxy = sh.make_proxy("WebClientProxy", "$client")
     client = cast(WebClient, proxy)
 
-print(client.BaseAddress)
+    print(client.BaseAddress)
 ```
 
 ## Attributes Available on a Proxy

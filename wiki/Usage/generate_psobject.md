@@ -44,10 +44,13 @@ After generation, import the new module and annotate your variables:
 from WebClient import WebClient
 from virtualshell import Shell
 
-shell = Shell()
+shell = Shell().start()
+
 proxy = shell.make_proxy("System.Net.WebClient")
 client: WebClient = proxy  # type checker now knows the shape
 print(client.BaseAddress)
+
+shell.stop()
 ```
 
 The protocol only describes the members discovered at generation time. If the PowerShell type changes or you need a different view, rerun `generate_psobject` with the updated command.
@@ -72,7 +75,7 @@ with Shell(strip_results=True, timeout_seconds=60) as sh:
 	print(f"Downloaded data from {url}:\n{data[:100]}...")
 ```
 
-See the [`make_proxy`](make_proxy.md) guide for full details on the proxy API and advanced options.
+See the [`Make Proxy`](Make_Proxy.md) guide for full details on the proxy API and advanced options.
 
 ## Troubleshooting
 
