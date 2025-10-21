@@ -92,8 +92,8 @@ from StreamWriter import StreamWriter  # generated via Shell().generate_psobject
 from StreamReader import StreamReader
 
 with Shell(strip_results=True, timeout_seconds=60) as sh:
-    sh.run("$writer = New-Object System.IO.StreamWriter('test.txt')")
-    proxy_writer: StreamWriter = sh.make_proxy("StreamWriterProxy", "$writer")
+    sh.run("$writer = New-Object System.IO.StreamWriter('test.txt')") # create the object in PS
+    proxy_writer: StreamWriter = sh.make_proxy("StreamWriterProxy", "$writer") # type-hinted proxy (StreamWriter made via generate_psobject)
 
     proxy_writer.WriteLine("Test Line 1!")
     proxy_writer.WriteLine("Test Line 2!")
@@ -101,7 +101,7 @@ with Shell(strip_results=True, timeout_seconds=60) as sh:
     proxy_writer.Flush()
     proxy_writer.Close()
 
-    sh.run("$reader = New-Object System.IO.StreamReader('test.txt')")
+    sh.run("$reader = New-Object System.IO.StreamReader('test.txt')") # create the object in PS
     proxy_reader: StreamReader = sh.make_proxy("StreamReaderProxy", "$reader")
 
     while not proxy_reader.EndOfStream:
