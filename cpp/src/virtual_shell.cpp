@@ -248,6 +248,19 @@ void VirtualShell::stop(bool force) {
 
     VSHELL_DBG("LIFECYCLE", "stop(force=%d)", int(force));
 
+    // Invoke registered custom stop callbacks.
+    if (!isRestarting()) {
+        std::vector<std::function<void()>> callbacks;
+        {
+            std::lock_guard<std::mutex> lk(stopRegMx_);
+            callbacks = customStopCallbacks_;
+        }
+
+        for (auto& cb : callbacks) {
+            if (cb) cb();
+        }
+    }
+
     if (!force) {
         io_pump_.enqueue_write("exit\n");
         io_pump_.drain();

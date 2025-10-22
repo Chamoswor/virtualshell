@@ -135,8 +135,8 @@ More helpers live in the wiki, including session restore, batching, and diagnost
 from virtualshell import Shell
 
 shell = Shell(
-    powershell_path=r"C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-    working_directory=r"C:\\automation",
+    powershell_path="C:/Program Files/PowerShell/7/pwsh.exe",
+    working_directory="C:/automation",
     environment={"MY_FLAG": "1"},
     initial_commands=[
         "$ErrorActionPreference = 'Stop'",

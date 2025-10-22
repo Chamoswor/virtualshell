@@ -23,8 +23,10 @@
 // VIRTUALSHELL_DEBUG=1
 // VIRTUALSHELL_DEBUG_PATH=C:\temp\vshell.log
 // VIRTUALSHELL_DEBUG_EXCLUDE=IO,PARSE
+// VIRTUALSHELL_DEBUG_INCLUDE=PROXY,LOGGER
+// If both EXCLUDE and INCLUDE are set, INCLUDE takes precedence. So make sure INCLUDE is empty if you want EXCLUDE to take effect.
 
-static constexpr size_t MAX_EXCLUDED_TAGS = 16;
+static constexpr size_t MAX_TAGS = 16;
 
 namespace virtualshell {
 namespace dev {
@@ -77,8 +79,10 @@ public:
         if (!fh_) open_nolock_();
 
         if (!fh_) return; // give up if open failed
-
-        if (is_excluded_(tag)) {
+        if (only_included_ && !is_included_(tag)) {
+            return;
+        }
+        if (!only_included_ && is_excluded_(tag)) {
             return;
         }
 
@@ -122,12 +126,18 @@ private:
     Logger() {
         const char* env_on   = std::getenv("VIRTUALSHELL_DEBUG");
         const char* env_path = std::getenv("VIRTUALSHELL_DEBUG_PATH");
-        const char* env_excl = std::getenv("VIRTUALSHELL_DEBUG_EXCLUDE");
-        set_excluded_tags_(env_excl);
 
 
         if (env_path && *env_path) path_ = env_path;
         if (env_on && *env_on == '1') {
+            const char* env_excl = std::getenv("VIRTUALSHELL_DEBUG_EXCLUDE");
+            const char* env_incl = std::getenv("VIRTUALSHELL_DEBUG_INCLUDE");
+            set_included_only_tags_(env_incl);
+            if (!(included_only_tags_.size() > 0)) {
+                set_excluded_tags_(env_excl);
+            } else {
+                only_included_ = true;
+            }
             enabled_.store(true);
             open_nolock_();
             logf("LOGGER", "VirtualShell debug is ENABLED via environment variable. Set VIRTUALSHELL_DEBUG=0 to disable.");
@@ -139,8 +149,12 @@ private:
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
 
-    std::array<std::string, MAX_EXCLUDED_TAGS> excluded_tags_{};
+    std::array<std::string, MAX_TAGS> excluded_tags_{};
+    std::array<std::string, MAX_TAGS> included_only_tags_{};
     size_t excluded_count_{0};
+    size_t included_only_count_{0};
+
+    bool only_included_{false};
 
     /**
      * @brief Append a tag to the exclusion list, bounded by MAX_EXCLUDED_TAGS.
@@ -150,6 +164,13 @@ private:
         const size_t len = static_cast<size_t>(end - start);
         if (len == 0) return;
         excluded_tags_[excluded_count_++] = std::string(start, len);
+    }
+
+    void add_included_only_tag_(const char* start, const char* end) {
+        if (included_only_count_ >= included_only_tags_.size()) return;
+        const size_t len = static_cast<size_t>(end - start);
+        if (len == 0) return;
+        included_only_tags_[included_only_count_++] = std::string(start, len);
     }
 
 
@@ -172,6 +193,36 @@ private:
         }
         add_excluded_tag_(start, p);
         return excluded_count_ > 0;
+    }
+
+    bool set_included_only_tags_(const char* env_incl) {
+        included_only_tags_.fill({});
+        included_only_count_ = 0;
+        if (!env_incl || *env_incl == '\0') return false;
+
+        const char* start = env_incl;
+        const char* p = env_incl;
+        while (*p != '\0') {
+            if (*p == ',') {
+                add_included_only_tag_(start, p);
+                start = p + 1;
+            }
+            ++p;
+        }
+        add_included_only_tag_(start, p);
+        return included_only_count_ > 0;
+    }
+    
+
+    /**
+     * @brief Check whether a given tag should be included.
+     */
+    bool is_included_(const char* tag) const {
+        if (!tag) return false;
+        for (size_t i = 0; i < included_only_count_; ++i) {
+            if (included_only_tags_[i] == tag) return true;
+        }
+        return false;
     }
 
     /**

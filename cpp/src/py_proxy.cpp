@@ -1,5 +1,8 @@
 #include "../include/py_proxy.hpp"
 #include "../include/helpers.hpp"
+#include "../include/dev_debug.hpp"
+#include "../include/execution_result.hpp"
+#include "../include/helpers.hpp"
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
 #include <pybind11/pytypes.h>
@@ -8,16 +11,18 @@
 #include <sstream>
 #include <regex>
 #include <format>
+#include <atomic>
+#include <unordered_set>
 #include "dev_debug.hpp"
 
 
 namespace py = pybind11;
 
-namespace virtualshell::pybridge {
-
 namespace {
+
 constexpr long kPropertyFlags[] = {1, 2, 4, 16, 32, 512};
 constexpr long kMethodFlags[]   = {64, 128, 256};
+
 
 bool matches_flag(long value, const long* begin, const long* end) {
     for (auto it = begin; it != end; ++it) {
@@ -25,6 +30,7 @@ bool matches_flag(long value, const long* begin, const long* end) {
     }
     return false;
 }
+
 
 py::object dump_members(VirtualShell& shell, std::string objRef, int depth) {
     auto ref = std::move(objRef);
@@ -64,22 +70,219 @@ py::object coerce_scalar(std::string value) {
     return py::str(value);
 }
 
+// Key type for schema cache
+struct CacheKey {
+    uintptr_t shell;
+    std::string typeName;
+    int depth;
+    bool operator==(const CacheKey& o) const noexcept {
+        return shell == o.shell && depth == o.depth && typeName == o.typeName;
+    }
+};
+struct KeyHash {
+    size_t operator()(CacheKey const& k) const noexcept {
+        size_t h1 = std::hash<uintptr_t>{}(k.shell);
+        size_t h2 = std::hash<int>{}(k.depth);
+        size_t h3 = std::hash<std::string>{}(k.typeName);
+        return ((h1 ^ (h2 << 1)) >> 1) ^ (h3 << 1);
+    }
+};
+
+class SchemaCache {
+public:
+    explicit SchemaCache(size_t maxEntries = 128) : max_(maxEntries) {}
+
+    std::shared_ptr<const virtualshell::pybridge::PsProxy::SchemaRecord> get(const CacheKey& key) {
+        std::scoped_lock lk(mx_);
+        auto it = map_.find(key);
+        if (it == map_.end()) return {};
+        // move to front
+        lru_.splice(lru_.begin(), lru_, it->second.second);
+        return it->second.first;
+    }
+
+    void put(const CacheKey& key, std::shared_ptr<virtualshell::pybridge::PsProxy::SchemaRecord> schema) {
+        std::scoped_lock lk(mx_);
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            it->second.first = std::move(schema);
+            lru_.splice(lru_.begin(), lru_, it->second.second);
+            return;
+        }
+        lru_.push_front(key);
+        map_[key] = { std::move(schema), lru_.begin() };
+        if (map_.size() > max_) {
+            auto& victim = lru_.back();
+            map_.erase(victim);
+            lru_.pop_back();
+        }
+    }
+
+    bool track_shell(uintptr_t shellId) {
+        std::scoped_lock lk(mx_);
+        return registered_shells_.insert(shellId).second;
+    }
+
+    void clear_for(uintptr_t shellId) {
+        std::scoped_lock lk(mx_);
+        for (auto it = lru_.begin(); it != lru_.end(); ) {
+            if (it->shell == shellId) {
+                map_.erase(*it);
+                it = lru_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        registered_shells_.erase(shellId);
+    }
+
+private:
+    size_t max_;
+    std::mutex mx_;
+    std::list<CacheKey> lru_;
+    
+    std::unordered_map<CacheKey, std::pair<std::shared_ptr<const virtualshell::pybridge::PsProxy::SchemaRecord>, std::list<CacheKey>::iterator>, KeyHash> map_;
+    std::unordered_set<uintptr_t> registered_shells_;
+    
+};
+
+static SchemaCache g_schema_cache{128};
+
+static std::string get_real_ps_type(VirtualShell& shell, const std::string& objRefFallback, const std::string& providedTypeName) {
+    // Build "$X.PSObject.TypeNames[0]"
+    std::string expr = "$" + objRefFallback + ".PSObject.TypeNames[0]";
+    auto r = shell.execute(expr);
+    if (r.success && !r.out.empty()) {
+        auto s = r.out;
+        virtualshell::helpers::parsers::trim_inplace(s);
+        return s;
+    }
+    return providedTypeName;
+}
+
+static std::shared_ptr<virtualshell::pybridge::PsProxy::SchemaRecord> build_schema_for(VirtualShell& shell, const std::string& objRef, int depth, virtualshell::pybridge::PsProxy const& decoderSelf) {
+    auto members = dump_members(shell, objRef, depth); // existing helper you already have
+    auto sch = std::make_shared<virtualshell::pybridge::PsProxy::SchemaRecord>();
+
+    auto consume_entry_into = [&](py::dict entry){
+        py::object get = entry.attr("get");
+        py::object nameObj = get("Name", py::none());
+        if (nameObj.is_none()) return;
+        const std::string name = py::cast<std::string>(nameObj);
+
+        py::object memberTypeObj = get("MemberType", py::none());
+        bool isMethod = false, isProperty = false;
+
+        if (py::isinstance<py::int_>(memberTypeObj)) {
+            long flag = py::cast<long>(memberTypeObj);
+            if (matches_flag(flag, std::begin(kMethodFlags), std::end(kMethodFlags))) isMethod = true;
+            else if (matches_flag(flag, std::begin(kPropertyFlags), std::end(kPropertyFlags))) isProperty = true;
+        } else if (py::isinstance<py::str>(memberTypeObj)) {
+            const std::string text = py::cast<std::string>(memberTypeObj);
+            if (text.find("Method") != std::string::npos) isMethod = true;
+            else if (text.find("Property") != std::string::npos) isProperty = true;
+        }
+
+        if (isMethod) {
+            sch->methods[name] = decoderSelf.decode_method(entry);
+        } else if (isProperty) {
+            sch->properties[name] = decoderSelf.decode_property(entry);
+        }
+    };
+
+    if (!members.is_none()) {
+        if (py::isinstance<py::dict>(members)) {
+            py::dict d = members.cast<py::dict>();
+            bool specialized = false;
+            if (d.contains("Methods")) {
+                for (auto item : py::list(d["Methods"])) {
+                    if (py::isinstance<py::dict>(item)) consume_entry_into(item.cast<py::dict>());
+                }
+                specialized = true;
+            }
+            if (d.contains("Properties")) {
+                for (auto item : py::list(d["Properties"])) {
+                    if (py::isinstance<py::dict>(item)) consume_entry_into(item.cast<py::dict>());
+                }
+                specialized = true;
+            }
+            if (specialized) return sch;
+
+            // fallback: iterate plain dict-of-dicts
+            for (auto item : d) {
+                if (py::isinstance<py::dict>(item.second)) {
+                    consume_entry_into(item.second.cast<py::dict>());
+                }
+            }
+        } else {
+            for (auto item : py::list(members)) {
+                if (py::isinstance<py::dict>(item)) {
+                    consume_entry_into(item.cast<py::dict>());
+                }
+            }
+        }
+    }
+
+    return sch;
+}
 } // namespace
+
+namespace virtualshell::pybridge {
+
 
 PsProxy::PsProxy(VirtualShell& shell,
                  std::string typeName,
-                 std::string objectRef,
-                 int depth)
-    : shell_(shell),
-      typeName_(std::move(typeName)),
-      objRef_(std::move(objectRef)),
-      dynamic_(py::dict()),
-      methodCache_(py::dict()) {
-    if (!objRef_.empty() && objRef_[0] == '$') {
+                 std::string objectRef, int depth)
+  : shell_(shell),
+    typeName_(std::move(typeName)),
+    objRef_(std::move(objectRef)),
+    dynamic_(py::dict()),
+    methodCache_(py::dict())
+{
+    if (objRef_.empty() || objRef_[0] != '$') {
+        // If objectRef is not a variable, assume it's a type name and create it.
+        objRef_ = create_ps_object(objRef_);
+    } else {
+        // If it is a variable, strip the leading '$'
         objRef_ = objRef_.substr(1);
-    } 
-    ingest_members(depth);
+    }
+
+    const uintptr_t shellId = reinterpret_cast<uintptr_t>(&shell_);
+    const bool shouldRegisterStopCallback = g_schema_cache.track_shell(shellId);
+    if (shouldRegisterStopCallback) {
+        VSHELL_DBG("PROXY","Registering schema cache cleanup for shell %p", (void*)shellId);
+        shell_.registerStopCallback([shellId]() {
+            g_schema_cache.clear_for(shellId);
+        });
+    }
+
+    // 1) Try cache with provided type name first
+    CacheKey key1{ shellId, typeName_, depth };
+    if (auto cached = g_schema_cache.get(key1)) {
+        schema_ = cached;
+        VSHELL_DBG("PROXY","Cache hit for key1: %s", typeName_.c_str());
+        return;
+    }
+
+    // 2) Miss: try cache with "real" type name
+    const std::string realType = get_real_ps_type(shell_, objRef_, typeName_);
+    CacheKey key2{ shellId, realType, depth };
+    if (auto cached = g_schema_cache.get(key2)) {
+        schema_ = cached;
+        VSHELL_DBG("PROXY","Cache hit for key2: %s", realType.c_str());
+        return;
+    }
+
+    // 3) Full miss: try cache with "real" type name
+    auto sch = build_schema_for(shell_, objRef_, depth, *this); // returns shared_ptr<Schema>
+    schema_ = sch;
+    g_schema_cache.put(key2, sch);
+    if (key1.typeName != key2.typeName) {
+        g_schema_cache.put(key1, sch);
+    }
+    VSHELL_DBG("PROXY","Schema built and cached for type: %s (real type: %s)", typeName_.c_str(), realType.c_str());
 }
+
 
 py::object PsProxy::getattr(const std::string& name) {
     py::str key(name);
@@ -97,14 +300,14 @@ py::object PsProxy::getattr(const std::string& name) {
     if (methodCache_.contains(key)) {
         return methodCache_[key];
     }
-
-    if (auto mit = methods_.find(name); mit != methods_.end()) {
+    
+    if (auto mit = schema_ref().methods.find(name); mit != schema_ref().methods.end()) {
         auto callable = bind_method(name, mit->second);
         methodCache_[key] = callable;
         return callable;
     }
 
-    if (auto pit = properties_.find(name); pit != properties_.end()) {
+    if (auto pit = schema_ref().properties.find(name); pit != schema_ref().properties.end()) {
         return read_property(name);
     }
 
@@ -124,11 +327,11 @@ void PsProxy::setattr(const std::string& name, py::object value) {
         return;
     }
 
-    if (auto mit = methods_.find(name); mit != methods_.end()) {
+    if (auto mit = schema_ref().methods.find(name); mit != schema_ref().methods.end()) {
         throw py::attribute_error("Cannot overwrite proxied method '" + name + "'");
     }
 
-    if (auto pit = properties_.find(name); pit != properties_.end()) {
+    if (auto pit = schema_ref().properties.find(name); pit != schema_ref().properties.end()) {
         if (!pit->second.writable) {
             throw py::attribute_error("Property '" + name + "' is read-only");
         }
@@ -153,8 +356,8 @@ py::list PsProxy::dir() const {
 
     push("__members__");
     push("__type_name__");
-    for (const auto& kv : methods_)    push(kv.first);
-    for (const auto& kv : properties_) push(kv.first);
+    for (const auto& kv : schema_ref().methods) push(kv.first);
+    for (const auto& kv : schema_ref().properties) push(kv.first);
 
     auto extras = dynamic_.attr("keys")();
     for (auto item : extras) {
@@ -164,18 +367,87 @@ py::list PsProxy::dir() const {
     return out;
 }
 
+const PsProxy::SchemaRecord& PsProxy::schema_ref() const {
+    return *schema_;
+}
+
+inline bool is_simple_ident(const std::string& s) {
+    if (s.empty()) return false;
+    auto isAlpha = [](unsigned char c){ return (c>='A'&&c<='Z')||(c>='a'&&c<='z'); };
+    auto isNum   = [](unsigned char c){ return (c>='0'&&c<='9'); };
+    auto isUnd   = [](unsigned char c){ return c=='_'; };
+
+    if (!(isAlpha((unsigned char)s[0]) || isUnd((unsigned char)s[0]))) return false;
+    for (size_t i=1;i<s.size();++i){
+        unsigned char c = (unsigned char)s[i];
+        if (!(isAlpha(c) || isNum(c) || isUnd(c))) return false;
+    }
+    return true;
+}
+
+inline std::string escape_single_quotes(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        out.push_back(c);
+        if (c == '\'') out.push_back('\'');
+    }
+    return out;
+}
+
+inline std::string build_property_expr(const std::string& objRef_, const std::string& name) {
+    if (is_simple_ident(name)) {
+        return "$" + objRef_ + "." + name;
+    }
+    std::string escaped = escape_single_quotes(name);
+    return "$" + objRef_ + ".PSObject.Properties['" + escaped + "'].Value";
+}
+
+
+inline std::string build_method_invocation(const std::string& objRef_,
+                                           const std::string& name,
+                                           const std::vector<std::string>& args) {
+    std::string base;
+    if (is_simple_ident(name)) {
+        base = "$" + objRef_ + "." + name;
+    } else {
+        std::string escaped = escape_single_quotes(name);
+        base = "$" + objRef_ + ".PSObject.Methods['" + escaped + "'].Invoke";
+    }
+
+    std::string command;
+    std::size_t estimated = base.size() + 2; // account for "()"
+    for (const auto& arg : args) {
+        estimated += arg.size() + 2; // comma and space
+    }
+    command.reserve(estimated);
+    command.append(base);
+    command.push_back('(');
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (i) command.append(", ");
+        command.append(args[i]);
+    }
+    command.push_back(')');
+    return command;
+}
+
+
+inline void rstrip_newlines(std::string& s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+}
+
 py::dict PsProxy::schema() const {
     py::dict out;
     py::list methods;
     py::list props;
 
-    for (const auto& kv : methods_) {
+    for (const auto& kv : schema_ref().methods) {
         py::dict entry;
         entry["Name"] = kv.first;
         entry["Awaitable"] = kv.second.awaitable;
         methods.append(entry);
     }
-    for (const auto& kv : properties_) {
+    for (const auto& kv : schema_ref().properties) {
         py::dict entry;
         entry["Name"] = kv.first;
         entry["Writable"] = kv.second.writable;
@@ -185,92 +457,6 @@ py::dict PsProxy::schema() const {
     out["Methods"] = methods;
     out["Properties"] = props;
     return out;
-}
-
-void PsProxy::ingest_members(int depth) {
-    auto consume_entry = [&](py::dict entry) {
-        py::object get = entry.attr("get");
-        py::object nameObj = get("Name", py::none());
-        if (nameObj.is_none()) return;
-        const std::string name = py::cast<std::string>(nameObj);
-
-        py::object memberTypeObj = get("MemberType", py::none());
-        bool isMethod = false;
-        bool isProperty = false;
-
-        if (py::isinstance<py::int_>(memberTypeObj)) {
-            long flag = py::cast<long>(memberTypeObj);
-            if (matches_flag(flag, std::begin(kMethodFlags), std::end(kMethodFlags))) {
-                isMethod = true;
-            } else if (matches_flag(flag, std::begin(kPropertyFlags), std::end(kPropertyFlags))) {
-                isProperty = true;
-            }
-        } else if (py::isinstance<py::str>(memberTypeObj)) {
-            const std::string text = py::cast<std::string>(memberTypeObj);
-            if (text.find("Method") != std::string::npos) {
-                isMethod = true;
-            } else if (text.find("Property") != std::string::npos ||
-                       text == "NoteProperty" || text == "AliasProperty") {
-                isProperty = true;
-            }
-        }
-
-        if (!isMethod && !isProperty) {
-            py::object def = get("Definition", py::none());
-            if (py::isinstance<py::str>(def)) {
-                const std::string definition = py::cast<std::string>(def);
-                if (definition.find("(") != std::string::npos &&
-                    definition.find(")") != std::string::npos) {
-                    isMethod = true;
-                }
-            }
-        }
-
-        if (isMethod) {
-            methods_.emplace(name, decode_method(std::move(entry)));
-        } else {
-            properties_.emplace(name, decode_property(std::move(entry)));
-        }
-    };
-
-    py::object members = dump_members(shell_, objRef_, depth);
-
-    if (members.is_none()) return;
-
-    if (py::isinstance<py::dict>(members)) {
-        py::dict d = members.cast<py::dict>();
-        bool specialized = false;
-        if (d.contains("Methods")) {
-            for (auto item : py::list(d["Methods"])) {
-                if (py::isinstance<py::dict>(item)) {
-                    consume_entry(item.cast<py::dict>());
-                }
-            }
-            specialized = true;
-        }
-        if (d.contains("Properties")) {
-            for (auto item : py::list(d["Properties"])) {
-                if (py::isinstance<py::dict>(item)) {
-                    consume_entry(item.cast<py::dict>());
-                }
-            }
-            specialized = true;
-        }
-        if (specialized) return;
-
-        for (auto item : d) {
-            if (py::isinstance<py::dict>(item.second)) {
-                consume_entry(item.second.cast<py::dict>());
-            }
-        }
-        return;
-    }
-
-    for (auto item : py::list(members)) {
-        if (py::isinstance<py::dict>(item)) {
-            consume_entry(item.cast<py::dict>());
-        }
-    }
 }
 
 PsProxy::MethodMeta PsProxy::decode_method(py::dict entry) const {
@@ -379,70 +565,65 @@ std::string PsProxy::format_argument(py::handle value) const {
     return py::cast<std::string>(py::str(value));
 }
 
-inline bool is_simple_ident(const std::string& s) {
-    if (s.empty()) return false;
-    auto isAlpha = [](unsigned char c){ return (c>='A'&&c<='Z')||(c>='a'&&c<='z'); };
-    auto isNum   = [](unsigned char c){ return (c>='0'&&c<='9'); };
-    auto isUnd   = [](unsigned char c){ return c=='_'; };
+std::string PsProxy::create_ps_object(const std::string& typeNameWithArgs) {
+    // 1. Generate a unique variable name for the proxy object
+    static std::atomic<uint32_t> counter = 0;
+    std::string varName = "proxy_obj_" + std::to_string(counter++);
+    std::string psVar = "$" + varName;
 
-    if (!(isAlpha((unsigned char)s[0]) || isUnd((unsigned char)s[0]))) return false;
-    for (size_t i=1;i<s.size();++i){
-        unsigned char c = (unsigned char)s[i];
-        if (!(isAlpha(c) || isNum(c) || isUnd(c))) return false;
+    // 2. Parse type name and arguments
+    std::string typeName = typeNameWithArgs;
+    std::string args;
+    size_t parenPos = typeNameWithArgs.find('(');
+    if (parenPos != std::string::npos) {
+        typeName = typeNameWithArgs.substr(0, parenPos);
+        virtualshell::helpers::parsers::trim_inplace(typeName);
+        size_t endParenPos = typeNameWithArgs.rfind(')');
+        if (endParenPos != std::string::npos && endParenPos > parenPos) {
+            args = typeNameWithArgs.substr(parenPos + 1, endParenPos - parenPos - 1);
+        }
     }
-    return true;
-}
 
-inline std::string escape_single_quotes(const std::string& name) {
-    std::string out;
-    out.reserve(name.size());
-    for (char c : name) {
-        out.push_back(c);
-        if (c == '\'') out.push_back('\'');
+    std::string bracketedType = typeName;
+    if (bracketedType.front() != '[' || bracketedType.back() != ']') {
+        bracketedType = "[" + bracketedType + "]";
     }
-    return out;
-}
 
-inline std::string build_property_expr(const std::string& objRef_, const std::string& name) {
-    if (is_simple_ident(name)) {
-        return "$" + objRef_ + "." + name;
-    }
-    std::string escaped = escape_single_quotes(name);
-    return "$" + objRef_ + ".PSObject.Properties['" + escaped + "'].Value";
-}
-
-
-inline std::string build_method_invocation(const std::string& objRef_,
-                                           const std::string& name,
-                                           const std::vector<std::string>& args) {
-    std::string base;
-    if (is_simple_ident(name)) {
-        base = "$" + objRef_ + "." + name;
+    // 3. Build a list of creation strategies
+    std::vector<std::string> strategies;
+    if (!args.empty()) {
+        strategies.push_back(psVar + " = New-Object -TypeName '" + typeName + "' -ArgumentList " + args + " -ErrorAction Stop");
+        strategies.push_back(psVar + " = " + bracketedType + "::new(" + args + ")");
+        strategies.push_back(psVar + " = " + bracketedType + "::New(" + args + ")");
     } else {
-        std::string escaped = escape_single_quotes(name);
-        base = "$" + objRef_ + ".PSObject.Methods['" + escaped + "'].Invoke";
+        strategies.push_back(psVar + " = New-Object -TypeName '" + typeName + "' -ErrorAction Stop");
+        strategies.push_back(psVar + " = " + bracketedType + "::new()");
+        strategies.push_back(psVar + " = " + bracketedType + "::New()");
+    }
+    // Add COM object strategy if type name looks like it could be one
+    if (typeName.find('.') != std::string::npos) {
+        strategies.push_back(psVar + " = New-Object -ComObject '" + typeName + "' -ErrorAction Stop");
     }
 
-    std::string command;
-    std::size_t estimated = base.size() + 2; // account for "()"
-    for (const auto& arg : args) {
-        estimated += arg.size() + 2; // comma and space
+    // 4. Try strategies until one succeeds
+    virtualshell::core::ExecutionResult result;
+    bool success = false;
+    for (const auto& cmd : strategies) {
+        result = shell_.execute(cmd);
+        if (result.success) {
+            success = true;
+            VSHELL_DBG("PROXY", "Object creation succeeded with command: %s", cmd.c_str());
+            break;
+        }
     }
-    command.reserve(estimated);
-    command.append(base);
-    command.push_back('(');
-    for (std::size_t i = 0; i < args.size(); ++i) {
-        if (i) command.append(", ");
-        command.append(args[i]);
+
+    if (!success) {
+        throw std::runtime_error("Failed to create PowerShell object for type '" + typeNameWithArgs + "'. Last error: " + result.err);
     }
-    command.push_back(')');
-    return command;
+
+    return varName; // Return the variable name without the '$'
 }
 
-
-inline void rstrip_newlines(std::string& s) {
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-}
 
 py::object PsProxy::bind_method(const std::string& name, const MethodMeta& meta) {
     auto formatter = [this](py::handle h) { return format_argument(h); };

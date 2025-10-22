@@ -79,6 +79,8 @@ private:
     std::mutex stateMx_; ///< Protects inflight_ and inflightOrder_
     std::unordered_map<uint64_t, std::unique_ptr<virtualshell::core::CmdState>> inflight_; ///< Active commands by ID
 
+    std::mutex stopRegMx_; ///< Protects customStopCallbacks_
+
     std::atomic<uint64_t> seq_{0}; ///< Monotonic sequence for command IDs
 
 
@@ -124,6 +126,7 @@ private:
 
     std::thread timerThread_;       ///< Background watchdog thread for timeouts
     std::atomic<bool> timerRun_{false}; ///< True while timeout watchdog is active
+    std::vector<std::function<void()>> customStopCallbacks_;
 
 public:
 
@@ -138,7 +141,11 @@ public:
         uint32_t high_water; ///< Highest observed number of in-flight commands
     };
 
-    
+    void registerStopCallback(std::function<void()> cb) {
+        std::lock_guard<std::mutex> lk(stopRegMx_);
+        customStopCallbacks_.emplace_back(std::move(cb));
+    }
+
     std::shared_ptr<VirtualShell> getSharedPtr() {
         return shared_from_this();
     }
