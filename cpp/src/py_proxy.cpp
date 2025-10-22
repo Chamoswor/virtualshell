@@ -238,14 +238,6 @@ PsProxy::PsProxy(VirtualShell& shell,
     objRef_(std::move(objectRef)),
     dynamic_(py::dict()),
     methodCache_(py::dict())
-{
-    if (objRef_.empty() || objRef_[0] != '$') {
-        // If objectRef is not a variable, assume it's a type name and create it.
-        objRef_ = create_ps_object(objRef_);
-    } else {
-        // If it is a variable, strip the leading '$'
-        objRef_ = objRef_.substr(1);
-    }
 
     const uintptr_t shellId = reinterpret_cast<uintptr_t>(&shell_);
     const bool shouldRegisterStopCallback = g_schema_cache.track_shell(shellId);
