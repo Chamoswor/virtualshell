@@ -14,7 +14,7 @@ proxy = shell.make_proxy(type_name: str,
 | Parameter | Description |
 |-----------|-------------|
 | `type_name` | Friendly name assigned to the proxy type (used for error messages and `__type_name__`). |
-| `object_expression` | PowerShell expression that resolves to the underlying object (for example `"$client"` or `"[System.Net.WebClient]::new()"`). |
+| `object_expression` | PowerShell expression that resolves to the underlying object (for example `"$client"`. |
 | `depth` | Controls how deep `Get-Member` metadata is harvested (default `4`). Increase when nested members expose additional structure. |
 
 The call returns a live proxy object. Attribute reads and method invocations transparently run in PowerShell, and results are coerced back to Python scalars when possible.
