@@ -238,7 +238,7 @@ PsProxy::PsProxy(VirtualShell& shell,
     objRef_(std::move(objectRef)),
     dynamic_(py::dict()),
     methodCache_(py::dict())
-
+{
     const uintptr_t shellId = reinterpret_cast<uintptr_t>(&shell_);
     const bool shouldRegisterStopCallback = g_schema_cache.track_shell(shellId);
     if (shouldRegisterStopCallback) {
