@@ -16,7 +16,6 @@ High-performance PowerShell automation for Python. `virtualshell` keeps a single
 - **Type-safe automation** – generate Python `Protocol`s from PowerShell objects and create live proxies with full type hints.
 
 Typical users embed PowerShell inside Python orchestration, long-running agents, or test suites that need reliability and speed.
-
 ---
 
 ## Installation
