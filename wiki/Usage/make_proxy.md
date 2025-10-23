@@ -80,10 +80,10 @@ with Shell(strip_results=True, timeout_seconds=120) as sh:
 from virtualshell import Shell
 with Shell(strip_results=True, timeout_seconds=120, stdin_buffer_size=640 * 1024) as sh:
     sw = sh.make_proxy("StreamWriterProxy", "System.IO.StreamWriter('file.txt')")
-    num_lines = 10000
+    num_lines = 1000
     lines = [f"Line {i}" for i in range(num_lines)]
 
-    # Batch write 10000 lines in one PowerShell call
+    # Batch write 1000 lines in one PowerShell call
     sw.proxy_multi_call(sw.WriteLine, lines)
 
     sw.Flush()
