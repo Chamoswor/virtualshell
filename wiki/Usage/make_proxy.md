@@ -78,7 +78,7 @@ with Shell(strip_results=True, timeout_seconds=120) as sh:
 ### Example - Using proxy_multi_call for batch calls
 ```python
 from virtualshell import Shell
-with Shell(strip_results=True, timeout_seconds=120, stdin_buffer_size=64 * 1024 * 10) as sh:
+with Shell(strip_results=True, timeout_seconds=120, stdin_buffer_size=640 * 1024) as sh:
     sw = sh.make_proxy("StreamWriterProxy", "System.IO.StreamWriter('file.txt')")
     num_lines = 10000
     lines = [f"Line {i}" for i in range(num_lines)]
