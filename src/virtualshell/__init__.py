@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 try:
     from ._version import version as __version__
 except Exception:
-    __version__ = "1.1.1"
+    __version__ = "1.1.2"
 
 
 from .errors import (
