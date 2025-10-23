@@ -137,12 +137,15 @@ shell = Shell(
     powershell_path="C:/Program Files/PowerShell/7/pwsh.exe",
     working_directory="C:/automation",
     environment={"MY_FLAG": "1"},
+    timeout_seconds=10,
+    auto_restart_on_timeout=True,
+    stdin_buffer_size=64 * 1024,
     initial_commands=[
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
     ],
-    timeout_seconds=10,
-    auto_restart_on_timeout=True,
+    set_UTF8=True,
+    strip_results=False,
 )
 
 shell.start()
