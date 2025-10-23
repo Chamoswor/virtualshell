@@ -54,7 +54,7 @@ with Shell() as sh:
 - Member metadata is cached per proxy type to avoid repeated `Get-Member` calls.
 - Repeated method calls with the same argument types reuse prepared PowerShell scripts for speed. Usage:
 
-### Example - Basic File Writing
+### Example - Basic File Writing/Reading
 ```python
 from virtualshell import Shell
 with Shell(strip_results=True, timeout_seconds=120) as sh:
