@@ -121,6 +121,8 @@ Detailed guides live in the wiki: [generate_psobject](wiki/Usage/generate_psobje
 | `Shell.script_async(...)` | Async counterpart of `script`. |
 | `Shell.save_session()` | Persist the current session to an XML snapshot. |
 | `Shell.pwsh(text)` | Safely echo a literal PowerShell string (auto quoting). |
+| `Shell.make_proxy(type_name, object_expression, *, depth=4)` | Create a live PowerShell object proxy. |
+| `Shell.generate_psobject(type_expression, output_path)` | Generate a Python `Protocol` for a PowerShell object type. |
 
 More helpers live in the wiki, including session restore, batching, and diagnostic tips.
 
