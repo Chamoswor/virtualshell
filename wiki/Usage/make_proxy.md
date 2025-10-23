@@ -41,8 +41,7 @@ from WebClient import WebClient  # generated protocol
 from virtualshell import Shell
 
 with Shell() as sh:
-    sh.run("$client = New-Object System.Net.WebClient")
-    proxy = sh.make_proxy("WebClientProxy", "$client")
+    proxy = sh.make_proxy("WebClientProxy", "System.Net.WebClient")
     client: WebClient = proxy  # type checker now knows the shape
 
     print(client.BaseAddress)
