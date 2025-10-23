@@ -15,13 +15,3 @@ with Shell() as sh:
         if not r.success:
             print("failed:", r.err)
 ```
-
-**Raising on error**
-```python
-with Shell() as sh:
-    r = sh.run("throw 'boom'", raise_on_error=False)  # no Python exception
-    try:
-        sh.run("throw 'boom'", raise_on_error=True)   # raises ExecutionError
-    except Exception as e:
-        print(e)
-```

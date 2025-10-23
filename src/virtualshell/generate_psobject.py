@@ -323,7 +323,7 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
         line = build_method_signature(safe_name, entry, typing_bits, runtime_bits)
         method_lines.append(line)
 
-    method_lines.append("    def proxy_multi_call(self, func: Callable[..., Any], *args: Any) -> str: ...")
+    method_lines.append("    def proxy_multi_call(self, func: Callable[..., Any], *args: Any) -> list[Any]: ...")
     method_lines.append("    def proxy_schema(self) -> str: ...")
 
     if prop_lines and prop_lines[-1] == "":

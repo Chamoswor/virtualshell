@@ -48,14 +48,69 @@ with Shell() as sh:
     print(client.BaseAddress)
 ```
 
+
+
+## Optimizations implemented
+- Member metadata is cached per proxy type to avoid repeated `Get-Member` calls.
+- Repeated method calls with the same argument types reuse prepared PowerShell scripts for speed. Usage:
+
+### Example - Basic File Writing
+```python
+from virtualshell import Shell
+with Shell(strip_results=True, timeout_seconds=120) as sh:
+    sw = sh.make_proxy("StreamWriterProxy", "System.IO.StreamWriter('file.txt')")
+
+    for i in range(5):
+        sw.WriteLine(f"Line {i}")
+
+    sw.Flush()
+    sw.Close()
+    sw.Dispose()
+
+    sr = sh.make_proxy("StreamReaderProxy", "System.IO.StreamReader('file.txt')")
+    while not sr.EndOfStream:
+        print(sr.ReadLine())
+
+    sr.Close()
+    sr.Dispose()
+```
+
+### Example - Using proxy_multi_call for batch calls
+```python
+from virtualshell import Shell
+with Shell(strip_results=True, timeout_seconds=120, stdin_buffer_size=64 * 1024 * 10) as sh:
+    sw = sh.make_proxy("StreamWriterProxy", "System.IO.StreamWriter('file.txt')")
+    num_lines = 10000
+    lines = [f"Line {i}" for i in range(num_lines)]
+
+    # Batch write 10000 lines in one PowerShell call
+    sw.proxy_multi_call(sw.WriteLine, lines)
+
+    sw.Flush()
+    sw.Close()
+    sw.Dispose()
+
+    sr = sh.make_proxy("StreamReaderProxy", "System.IO.StreamReader('file.txt')")
+    r: list[str] = sr.proxy_multi_call(sr.ReadLine, num_lines)
+
+    # Print the first 100 lines
+    for line in r[:100]:
+        print(line)
+
+    sr.Close()
+    sr.Dispose()
+```
+
 ## Attributes Available on a Proxy
 
 - Regular properties call into PowerShell (including updating values if the property is writable).
 - Methods support positional arguments; asynchronous .NET Task-returning methods are awaited automatically.
-- `__members__` returns a schema describing discovered methods and properties.
+- `proxy_schema` returns a dictionary of member names to their types (as strings).
+- `proxy_multi_call` enables batching multiple method calls into a single PowerShell invocation for performance.
+- `__getattr__` and `__setattr__` support dynamic member access.
 - `__dict__` exposes a per-proxy dictionary for dynamic Python-side state.
-- `dir(proxy)` enumerates PowerShell members plus any dynamic attributes.
-
+- `__dir__` lists available members for IDE auto-completion.
+- `__repr__` shows the proxy type and underlying PowerShell expression.
 ## Error Handling
 
 - Missing members raise `AttributeError`.
@@ -67,3 +122,4 @@ with Shell() as sh:
 - Keep your proxies alive only while the `Shell` is running. After `.stop()` the backing object is no longer valid.
 - Use `depth` selectively; very deep `Get-Member` calls can be slow for large graphs.
 - Combine with Python's `typing.cast` to inform type-checkers about the protocol you expect the proxy to satisfy.
+- Use `proxy_multi_call` for high-frequency method invocations to reduce inter-process overhead.

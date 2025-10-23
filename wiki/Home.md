@@ -8,3 +8,6 @@
 - Futures‑based async with optional callbacks
 - Timeouts and automatic restart of the backend process (opt‑in)
 - Typed error translation (timeout/error) and simple success checks
+- PowerShell object proxies for type-safe access to complex objects
+- Session save/restore for crash recovery
+- Configurable environment, working directory, UTF-8 mode, and more

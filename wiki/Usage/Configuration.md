@@ -6,6 +6,7 @@
 - `timeout_seconds: float = 5.0` – default per‑command timeout
 - `auto_restart_on_timeout: bool = True` – if `True`, backend restarts after timeout; Python side won’t raise timeout by default
 - `environment: Optional[Dict[str,str]]` – extra env vars for the child
+- `stdin_buffer_size: int = 65536` – size of the stdin pipe buffer in bytes
 - `initial_commands: Optional[List[str]]` – send commands at process start
 - `set_UTF8: bool = True` – set UTF‑8 output encoding in session
 - `strip_results: bool = False` – when `True`, trims whitespace for `.out` / `.err` on returned results (dataclass path)
