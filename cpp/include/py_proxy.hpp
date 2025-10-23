@@ -29,6 +29,7 @@ public:
     };
     MethodMeta decode_method(pybind11::dict entry) const;
     PropertyMeta decode_property(pybind11::dict entry) const;
+    pybind11::list multi_call(const pybind11::function& func, pybind11::args args);
 
 private:
     const SchemaRecord& schema_ref() const;
@@ -37,6 +38,7 @@ private:
     pybind11::object read_property(const std::string& name) const;
     void write_property(const std::string& name, const PropertyMeta& meta, pybind11::handle value);
     std::string create_ps_object(const std::string& typeNameWithArgs);
+    
 
     VirtualShell& shell_;
     std::string typeName_;

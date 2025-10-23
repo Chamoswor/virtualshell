@@ -33,6 +33,7 @@ struct ProcessConfig {
     std::string working_directory{};               ///< Working directory passed to CreateProcess/posix_spawn
     std::map<std::string, std::string> environment{}; ///< Extra environment variables for the child
     std::vector<std::string> additional_arguments{};  ///< Additional command-line arguments appended verbatim
+    size_t stdin_buffer_size{64 * 1024};   ///< Size of the pipe buffer (bytes)
 };
 
 /**

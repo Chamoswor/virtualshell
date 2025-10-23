@@ -55,6 +55,7 @@ py::object dump_members(VirtualShell& shell, std::string objRef, int depth) {
 
 py::object coerce_scalar(std::string value) {
     virtualshell::helpers::parsers::trim_inplace(value);
+
     if (value.empty()) return py::none();
     if (value == "True" || value == "$true")  return py::bool_(true);
     if (value == "False" || value == "$false") return py::bool_(false);
@@ -239,6 +240,9 @@ PsProxy::PsProxy(VirtualShell& shell,
     dynamic_(py::dict()),
     methodCache_(py::dict())
 {
+    if (objRef_[0] != '$') {
+        objRef_ = create_ps_object(objRef_);
+    }
     const uintptr_t shellId = reinterpret_cast<uintptr_t>(&shell_);
     const bool shouldRegisterStopCallback = g_schema_cache.track_shell(shellId);
     if (shouldRegisterStopCallback) {
@@ -616,6 +620,106 @@ std::string PsProxy::create_ps_object(const std::string& typeNameWithArgs) {
     return varName; // Return the variable name without the '$'
 }
 
+py::list PsProxy::multi_call(const py::function& func, py::args args) {
+    // Check if func is a method of this proxy
+    std::string methodName = func.attr("__name__").cast<std::string>();
+    auto method_it = schema_ref().methods.find(methodName);
+    if (method_it == schema_ref().methods.end()) {
+        throw py::type_error("Function is not a method of this proxy");
+    }
+
+    const auto& meta = method_it->second;
+    py::list final_results;
+    constexpr size_t BATCH_SIZE = 1000;
+
+    auto process_batch = [&](const std::string& command_batch) {
+        if (command_batch.empty()) return;
+
+        std::string full_command = "$batch_result = @();\n" + command_batch + "$batch_result | ConvertTo-Json -Compress -Depth 5\n";
+        auto result = shell_.execute(full_command);
+
+        if (!result.success) {
+            throw py::value_error("PowerShell multi-call batch for method '" + methodName + "' failed: " + result.err);
+        }
+        if (result.out.empty() || result.out == "null") return;
+
+        try {
+            py::object json_module = py::module_::import("json");
+            py::object batch_results = json_module.attr("loads")(result.out);
+            if (py::isinstance<py::list>(batch_results)) {
+                for (auto item : batch_results.cast<py::list>()) {
+                    final_results.append(item);
+                }
+            } else {
+                final_results.append(batch_results);
+            }
+        } catch (const py::error_already_set& e) {
+            throw std::runtime_error("Failed to parse JSON from batch result: " + std::string(e.what()));
+        }
+    };
+
+    // Case 1: A single integer is passed to repeat the call.
+    if (args.size() == 1 && py::isinstance<py::int_>(args[0])) {
+        size_t total_calls = py::cast<size_t>(args[0]);
+        std::vector<std::string> psArgsForCall; // Empty vector for no-argument call
+        std::string single_invocation = build_method_invocation(objRef_, methodName, psArgsForCall);
+        if (meta.awaitable) {
+            single_invocation = "(" + single_invocation + ").GetAwaiter().GetResult()";
+        }
+
+        std::string command_batch;
+        for (size_t i = 0; i < total_calls; ++i) {
+            command_batch += "$batch_result += " + single_invocation + ";\n";
+            if ((i + 1) % BATCH_SIZE == 0 || i == total_calls - 1) {
+                process_batch(command_batch);
+                command_batch.clear();
+            }
+        }
+    }
+    // Case 2: A single list is passed, iterate over its items.
+    else if (args.size() == 1 && py::isinstance<py::list>(args[0])) {
+        py::list arg_list = py::reinterpret_borrow<py::list>(args[0]);
+        size_t total_calls = arg_list.size();
+        std::string command_batch;
+
+        for (size_t i = 0; i < total_calls; ++i) {
+            std::vector<std::string> psArgsForCall;
+            psArgsForCall.push_back(format_argument(arg_list[i]));
+            std::string single_invocation = build_method_invocation(objRef_, methodName, psArgsForCall);
+            if (meta.awaitable) {
+                single_invocation = "(" + single_invocation + ").GetAwaiter().GetResult()";
+            }
+            command_batch += "$batch_result += " + single_invocation + ";\n";
+
+            if ((i + 1) % BATCH_SIZE == 0 || i == total_calls - 1) {
+                process_batch(command_batch);
+                command_batch.clear();
+            }
+        }
+    }
+    // Case 3: Fallback for a sequence of arguments (e.g., multi_call(method, arg1, arg2, ...))
+    else {
+        size_t total_calls = args.size();
+        std::string command_batch;
+
+        for (size_t i = 0; i < total_calls; ++i) {
+            std::vector<std::string> psArgsForCall;
+            psArgsForCall.push_back(format_argument(args[i]));
+            std::string single_invocation = build_method_invocation(objRef_, methodName, psArgsForCall);
+            if (meta.awaitable) {
+                single_invocation = "(" + single_invocation + ").GetAwaiter().GetResult()";
+            }
+            command_batch += "$batch_result += " + single_invocation + ";\n";
+
+            if ((i + 1) % BATCH_SIZE == 0 || i == total_calls - 1) {
+                process_batch(command_batch);
+                command_batch.clear();
+            }
+        }
+    }
+
+    return final_results;
+}
 
 py::object PsProxy::bind_method(const std::string& name, const MethodMeta& meta) {
     auto formatter = [this](py::handle h) { return format_argument(h); };

@@ -184,6 +184,7 @@ bool VirtualShell::start() {
     procCfg.powershell_path = config.powershellPath;
     procCfg.working_directory = config.workingDirectory;
     procCfg.environment = config.environment;
+    procCfg.stdin_buffer_size = config.stdin_buffer_size;
 
     auto process = std::make_unique<virtualshell::core::PowerShellProcess>(std::move(procCfg));
     if (!process->start()) {

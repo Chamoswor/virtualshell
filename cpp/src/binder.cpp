@@ -62,6 +62,7 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("initial_commands",     &VirtualShell::Config::initialCommands)
         .def_readwrite("restore_script_path",  &VirtualShell::Config::restoreScriptPath)
         .def_readwrite("session_snapshot_path", &VirtualShell::Config::sessionSnapshotPath)
+        .def_readwrite("stdin_buffer_size",    &VirtualShell::Config::stdin_buffer_size)
         .def("__repr__", [](const VirtualShell::Config& c) {
             return "<Config powershell_path='" + c.powershellPath +
                    "' timeout=" + std::to_string(c.timeoutSeconds) + "s>";
@@ -259,7 +260,8 @@ PYBIND11_MODULE(_core, m) {
         .def("__getattr__", &virtualshell::pybridge::PsProxy::getattr)
         .def("__setattr__", &virtualshell::pybridge::PsProxy::setattr)
         .def("__dir__", &virtualshell::pybridge::PsProxy::dir)
-        .def("schema", &virtualshell::pybridge::PsProxy::schema)
+        .def("proxy_schema", &virtualshell::pybridge::PsProxy::schema)
+        .def("proxy_multi_call", &virtualshell::pybridge::PsProxy::multi_call)
         .def_property_readonly("type_name", &virtualshell::pybridge::PsProxy::type_name)
         .def("__repr__", [](const virtualshell::pybridge::PsProxy& proxy) {
             return std::string("<PsProxy type='") + proxy.type_name() + "'>";

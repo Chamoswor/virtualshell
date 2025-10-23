@@ -249,8 +249,9 @@ bool PowerShellProcess::create_pipes_() {
     SECURITY_ATTRIBUTES attrs{};
     attrs.nLength = sizeof(attrs);
     attrs.bInheritHandle = TRUE;
+    
 
-    if (!CreatePipe(&stdin_read_, &stdin_write_, &attrs, 0)) {
+    if (!CreatePipe(&stdin_read_, &stdin_write_, &attrs, static_cast<DWORD>(config_.stdin_buffer_size))) {
         return false;
     }
     SetHandleInformation(stdin_write_, HANDLE_FLAG_INHERIT, 0);
@@ -600,7 +601,7 @@ std::optional<std::string> PowerShellProcess::read_fd_(int& fd) {
         return std::nullopt;
     }
 
-    std::array<char, kReadBufferSize> buffer{};
+    std::array<char, config_.stdin_buffer_size> buffer{};
     ssize_t count = read(fd, buffer.data(), buffer.size());
     if (count <= 0) {
         if (count == 0 || errno == EPIPE || errno == EBADF) {

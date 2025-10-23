@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import keyword
 import re
@@ -324,6 +323,9 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
         line = build_method_signature(safe_name, entry, typing_bits, runtime_bits)
         method_lines.append(line)
 
+    method_lines.append("    def proxy_multi_call(self, func: Callable[..., Any], *args: Any) -> str: ...")
+    method_lines.append("    def proxy_schema(self) -> str: ...")
+
     if prop_lines and prop_lines[-1] == "":
         prop_lines.pop()
 
@@ -338,7 +340,7 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
         lines.append("")
 
     typing_names = sorted(typing_bits)
-    lines.append(f"from typing import {', '.join(typing_names)}")
+    lines.append(f"from typing import {', '.join(typing_names)}, Callable")
     lines.append("")
     lines.append(f"__all__ = ['{class_name}']")
     lines.append("")

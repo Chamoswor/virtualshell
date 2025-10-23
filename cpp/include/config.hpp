@@ -20,6 +20,7 @@ struct Config {
 	std::vector<std::string> initialCommands;         ///< Commands executed immediately after start/ restart
 	std::string restoreScriptPath{""};       ///< Optional path to a restore script invoked after start
 	std::string sessionSnapshotPath{""};     ///< Optional path where session snapshots are persisted
+	size_t stdin_buffer_size{64 * 1024};     ///< Size of the pipe buffer (bytes)
 };
 } // namespace core
 } // namespace virtualshell

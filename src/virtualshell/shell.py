@@ -154,6 +154,7 @@ class Shell:
         timeout_seconds: float = 5.0,
         auto_restart_on_timeout: bool = True,
         environment: Optional[Dict[str, str]] = None,
+        stdin_buffer_size: int = 64 * 1024,
         initial_commands: Optional[List[str]] = None,
         set_UTF8: bool = True,
         strip_results: bool = False,
@@ -176,6 +177,8 @@ class Shell:
             default is True.
         environment : Optional[Dict[str, str]]
             Extra environment variables for the child process.
+        stdin_buffer_size : int
+            Size of the stdin pipe buffer in bytes. Default is 64 * 1024 (64 KiB).
         initial_commands : Optional[List[str]]
             Commands that the backend will issue on process start (e.g., encoding setup).
         set_UTF8 : bool
@@ -200,6 +203,7 @@ class Shell:
         if environment:
             # Copy to detach from caller's dict and avoid accidental mutation.
             cfg.environment = dict(environment)
+        cfg.stdin_buffer_size = int(stdin_buffer_size or 0)
         if initial_commands:
             # Force string-ification to prevent surprises from non-str types.
             cfg.initial_commands = list(map(str, initial_commands))
