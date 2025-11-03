@@ -151,7 +151,7 @@ shell = Shell(
 shell.start()
 ```
 
-Configuration is applied before the process starts. You can inspect or replace it later with `shell._core.get_config()` or rebuild the shell.
+Configuration is applied before the process starts. You can inspect later with `shell._core.get_config()`.
 
 ---
 
