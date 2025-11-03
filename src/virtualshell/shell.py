@@ -69,9 +69,17 @@ if TYPE_CHECKING:
         lastResult: ExecutionResult
         isComplete: bool
         allResults: List[ExecutionResult]
+
+    class SharedMemoryChannel(Protocol):
+        def __init__(self, name: str, n_slots: int, frame_bytes: int) -> None: ...
+        def write_to_powershell(self, data: bytes) -> None: ...
+        def read_from_powershell(self, seq: int) -> bytes: ...
+        def get_powershell_seq(self) -> int: ...
+        def get_python_seq(self) -> int: ...
 else:
     ExecutionResult = _CPP_MODULE.ExecutionResult
     BatchProgress = _CPP_MODULE.BatchProgress
+    SharedMemoryChannel = _CPP_MODULE.SharedMemoryChannel
 
 # ---------- Utils ----------
 def quote_pwsh_literal(s: str) -> str:
@@ -144,6 +152,11 @@ def _raise_on_failure(
     if raise_on_error:
         msg = err if err else f"{label} failed with exit_code={res.exit_code}"
         raise ExecutionError(msg)
+
+def create_shared_memory_channel(name: str, n_slots: int, frame_bytes: int) -> SharedMemoryChannel:
+    """Create a shared memory channel with `n_slots` slots of `frame_size` bytes each."""
+    mod = _CPP_MODULE
+    return mod.SharedMemoryChannel(name, n_slots, frame_bytes)
 
 # ---------- Public API ----------
 class Shell:
@@ -226,6 +239,8 @@ class Shell:
         self._core = mod.VirtualShell(cfg)
         self._strip_results = bool(strip_results)
         self._raise_on_timeout = not bool(auto_restart_on_timeout)
+        self._pwsh_mem_init = False
+        self.pid: Optional[int] = None
     
     @property
     def python_run_id(self) -> str:
@@ -251,8 +266,10 @@ class Shell:
         Raises `PowerShellNotFoundError` if the process cannot be started.
         """
         if self._core.is_alive():
+            
             return self
         if self._core.start():
+            self.pid = self._core.get_process_id()
             return self
 
         # Backend could not start the process; provide a precise error.
@@ -365,7 +382,6 @@ class Shell:
                 per_command_timeout_seconds=to,
             )
 
-        # Single command
         command = str(cmd)
         res_cb = (lambda r: _safe_call(callback, r)) if callback else None
         return self._core.execute_async(

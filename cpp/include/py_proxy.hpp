@@ -21,8 +21,25 @@ public:
     pybind11::dict schema() const;
 
     const std::string& type_name() const noexcept { return typeName_; }
-    struct MethodMeta { bool awaitable{false}; };
-    struct PropertyMeta { bool writable{false}; };
+
+        struct ParamMeta {
+        std::string name;
+        std::string typeName;
+        bool isOut{false};
+        bool isByRef{false};
+        bool isArray{false};
+    };
+
+    struct MethodMeta {
+        bool awaitable{false};
+        bool returnsVoid{false};
+        std::string returnType;
+        std::vector<ParamMeta> params;
+    };
+
+    struct PropertyMeta { 
+        bool writable{false}; 
+    };
     struct SchemaRecord {
         std::unordered_map<std::string, MethodMeta> methods;
         std::unordered_map<std::string, PropertyMeta> properties;

@@ -93,6 +93,8 @@ private:
     std::deque<uint64_t>  inflightOrder_;    ///< FIFO order of in-flight command IDs
     std::atomic<uint32_t> pendingTimeoutSentinels_{0}; ///< Expected stderr timeout sentinels to discard
 
+    std::atomic<int64_t> pid_{-1}; ///< Process ID of the PowerShell host
+
     /**
      * @internal
      * @brief Remove and return the CmdState for a given ID.
@@ -148,6 +150,10 @@ public:
 
     std::shared_ptr<VirtualShell> getSharedPtr() {
         return shared_from_this();
+    }
+
+    int64_t getProcessId() const {
+        return pid_.load(std::memory_order_acquire);
     }
 
     /**

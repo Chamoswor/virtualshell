@@ -9,10 +9,13 @@
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <regex>
 #include <format>
 #include <atomic>
 #include <unordered_set>
+#include <algorithm>
+#include <cstring>
 #include "dev_debug.hpp"
 
 
@@ -31,10 +34,28 @@ bool matches_flag(long value, const long* begin, const long* end) {
     return false;
 }
 
+// I anonymous namespace øverst i fila (samme sted som dump_members ligger i dag)
+static std::string ensure_dollar(const std::string& nameOrVar) {
+    if (!nameOrVar.empty() && nameOrVar[0] == '$') {
+        return nameOrVar;  // allerede "$foo"
+    }
+    return "$" + nameOrVar; // gjør "foo" -> "$foo"
+}
+
+auto escape_single_quotes = [](const std::string& s) {
+    std::string out;
+    out.reserve(s.size()*2);
+    for (char c : s) {
+        out.push_back(c);
+        if (c == '\'') out.push_back('\''); // PS single-quote escape
+    }
+    return out;
+};
+
 
 py::object dump_members(VirtualShell& shell, std::string objRef, int depth) {
     auto ref = std::move(objRef);
-    auto result = shell.execute("$" + ref + " | Get-Member | ConvertTo-Json -Depth " + std::to_string(depth) + " -Compress");
+    auto result = shell.execute(ensure_dollar(ref) + " | Get-Member | ConvertTo-Json -Depth " + std::to_string(depth) + " -Compress");
 
     if (!result.success) {
         std::cerr << "PowerShell failed: " << result.err << '\n';
@@ -70,6 +91,51 @@ py::object coerce_scalar(std::string value) {
 
     return py::str(value);
 }
+
+// 1) Sørge for at vi kan bygge en PowerShell "[byte[]](...)" literal.
+static std::string make_byte_array_literal_from_py(py::handle h) {
+    // Henter bytes ut av Python-objektet (bytearray, bytes, list[int], ...)
+    std::vector<unsigned int> vals;
+
+    if (PyByteArray_Check(h.ptr())) {
+        auto len = (size_t)PyByteArray_GET_SIZE(h.ptr());
+        const unsigned char* data = (const unsigned char*)PyByteArray_AS_STRING(h.ptr());
+        vals.reserve(len);
+        for (size_t i = 0; i < len; ++i) {
+            vals.push_back((unsigned int)data[i]);
+        }
+    } else if (py::isinstance<py::bytes>(h)) {
+        py::bytes b = h.cast<py::bytes>();
+        std::string s = b; // copies
+        vals.reserve(s.size());
+        for (unsigned char c : s) {
+            vals.push_back((unsigned int)c);
+        }
+    } else if (py::isinstance<py::list>(h)) {
+        py::list lst = h.cast<py::list>();
+        vals.reserve(py::len(lst));
+        for (auto item : lst) {
+            vals.push_back((unsigned int)py::cast<int>(item)); // assume 0..255
+        }
+    } else {
+        // fallback: prøv å tolke som bytes(str(...))
+        std::string s = py::cast<std::string>(py::str(h));
+        vals.reserve(s.size());
+        for (unsigned char c : s) {
+            vals.push_back((unsigned int)c);
+        }
+    }
+
+    // Lag noe som [byte[]](72,101,108,...)
+    std::string ps = "[byte[]](";
+    for (size_t i = 0; i < vals.size(); ++i) {
+        if (i) ps += ",";
+        ps += std::to_string(vals[i]);
+    }
+    ps += ")";
+    return ps;
+}
+
 
 // Key type for schema cache
 struct CacheKey {
@@ -149,9 +215,119 @@ private:
 
 static SchemaCache g_schema_cache{128};
 
+struct SignatureInfo {
+    std::string returnType;
+    bool returnsVoid{false};
+    std::vector<virtualshell::pybridge::PsProxy::ParamMeta> params;
+    int expectedArgCount() const {
+        return static_cast<int>(params.size());
+    }
+};
+
+
+static std::atomic<uint32_t> sigCounter{0};
+
+// Reflekter metainformasjon for en metode (første overload vi finner)
+static SignatureInfo reflect_signature_for(
+    VirtualShell& shell,
+    const std::string& objRef,      // uten '$', f.eks. "proxy_obj_3"
+    const std::string& methodName)  // f.eks. "ReadArray"
+{
+    SignatureInfo sig;
+
+    // Bygg PowerShell som kjører refleksjon:
+    // - Henter alle metoder som heter <methodName>
+    // - For hver: samler ReturnType + liste av parametre
+    // - Dumper som JSON
+    std::string safeName = escape_single_quotes(methodName);
+    std::string ps;
+    ps += "$__vs_obj = $" + ensure_dollar(objRef) + ";\n";
+    ps += "$__vs_sigs = @();\n";
+    ps += "foreach ($mi in ($__vs_obj.GetType().GetMethods() | Where-Object { $_.Name -eq '" + safeName + "' })) {\n";
+    ps += "  $params = @();\n";
+    ps += "  foreach ($p in $mi.GetParameters()) {\n";
+    ps += "    $params += [pscustomobject]@{\n";
+    ps += "      ParamName = $p.Name;\n";
+    ps += "      TypeName  = $p.ParameterType.FullName;\n";
+    ps += "      IsOut     = $p.IsOut;\n";
+    ps += "      IsByRef   = $p.ParameterType.IsByRef;\n";
+    ps += "      IsArray   = $p.ParameterType.IsArray;\n";
+    ps += "    };\n";
+    ps += "  }\n";
+    ps += "  $__vs_sigs += [pscustomobject]@{\n";
+    ps += "    ReturnType = $mi.ReturnType.FullName;\n";
+    ps += "    Params     = $params;\n";
+    ps += "  };\n";
+    ps += "}\n";
+    ps += "$__vs_sigs | ConvertTo-Json -Depth 8 -Compress\n";
+
+    std::string tempPath = "C:\\temp\\ps_sig_" + std::to_string(sigCounter++) + ".ps1";
+    std::ofstream out(tempPath, std::ios::out);
+    out.write(ps.data(), ps.size());
+    out.close();
+
+    auto exec = shell.execute_script(tempPath, std::vector<std::string>{}, 10.0, true);
+    if (!exec.success || exec.out.empty()) {
+        return sig;
+    }
+
+    virtualshell::helpers::parsers::trim_inplace(exec.out);
+
+    try {
+        py::object json_mod = py::module_::import("json");
+        py::object parsed   = json_mod.attr("loads")(py::str(exec.out));
+
+        py::object first;
+        if (py::isinstance<py::list>(parsed)) {
+            py::list lst = parsed.cast<py::list>();
+            if (lst.empty()) return sig;
+            first = lst[0];
+        } else {
+            first = parsed;
+        }
+
+        // ReturnType
+        {
+            py::object rt = first.attr("get")("ReturnType", py::none());
+            if (!rt.is_none()) {
+                sig.returnType = py::cast<std::string>(rt);
+            }
+        }
+
+        // Params
+        {
+            py::object pListObj = first.attr("get")("Params", py::list());
+            py::list pList      = pListObj.cast<py::list>();
+            for (auto pitem : pList) {
+                py::object get = pitem.attr("get");
+                virtualshell::pybridge::PsProxy::ParamMeta pm;
+                pm.name     = py::cast<std::string>(get("ParamName", py::str("")));
+                pm.typeName = py::cast<std::string>(get("TypeName",  py::str("")));
+                pm.isOut    = py::cast<bool>(get("IsOut",    py::bool_(false)));
+                pm.isByRef  = py::cast<bool>(get("IsByRef",  py::bool_(false)));
+                pm.isArray  = py::cast<bool>(get("IsArray",  py::bool_(false)));
+                sig.params.push_back(std::move(pm));
+            }
+        }
+        {
+            std::string lower = sig.returnType;
+            for (auto &c : lower) c = (char)std::tolower((unsigned char)c);
+            if (lower == "void" || lower == "system.void") {
+                sig.returnsVoid = true;
+            }
+        }
+
+    } catch (const py::error_already_set&) {
+    }
+
+    return sig;
+}
+
+
+
 static std::string get_real_ps_type(VirtualShell& shell, const std::string& objRefFallback, const std::string& providedTypeName) {
     // Build "$X.PSObject.TypeNames[0]"
-    std::string expr = "$" + objRefFallback + ".PSObject.TypeNames[0]";
+    std::string expr = ensure_dollar(objRefFallback) + ".PSObject.TypeNames[0]";
     auto r = shell.execute(expr);
     if (r.success && !r.out.empty()) {
         auto s = r.out;
@@ -185,7 +361,19 @@ static std::shared_ptr<virtualshell::pybridge::PsProxy::SchemaRecord> build_sche
         }
 
         if (isMethod) {
-            sch->methods[name] = decoderSelf.decode_method(entry);
+            auto mm = decoderSelf.decode_method(entry);
+
+            SignatureInfo sig = reflect_signature_for(shell, objRef, name);
+            if (!sig.returnType.empty()) {
+                mm.returnType   = sig.returnType;
+                mm.returnsVoid  = sig.returnsVoid;
+            }
+            if (!sig.params.empty()) {
+                mm.params = std::move(sig.params);
+            }
+            
+
+            sch->methods[name] = std::move(mm);
         } else if (isProperty) {
             sch->properties[name] = decoderSelf.decode_property(entry);
         }
@@ -226,6 +414,31 @@ static std::shared_ptr<virtualshell::pybridge::PsProxy::SchemaRecord> build_sche
 
     return sch;
 }
+
+static bool is_ps_scalar_type(const std::string& t)
+{
+    std::string lower = t;
+    for (auto &c : lower) c = (char)std::tolower((unsigned char)c);
+
+    if (lower == "string"          || lower == "system.string")          return true;
+    if (lower == "bool"            || lower == "system.boolean")         return true;
+    if (lower == "int"             || lower == "int32" ||
+        lower == "system.int32")                                       return true;
+    if (lower == "long"            || lower == "int64" ||
+        lower == "system.int64")                                       return true;
+    if (lower == "double"          || lower == "system.double")          return true;
+    if (lower == "single"          || lower == "float" ||
+        lower == "system.single")                                     return true;
+    if (lower == "decimal"         || lower == "system.decimal")         return true;
+
+    // Kan utvides ved behov
+    return false;
+}
+
+
+
+
+
 } // namespace
 
 namespace virtualshell::pybridge {
@@ -391,32 +604,46 @@ inline std::string escape_single_quotes(const std::string& name) {
     return out;
 }
 
+inline std::string qualify_objref(const std::string& objRef) {
+    // Ensure we always end up with something like "$foo", not "$$foo"
+    if (!objRef.empty() && objRef[0] == '$') {
+        return objRef;
+    }
+    return "$" + objRef;
+}
+
+
 inline std::string build_property_expr(const std::string& objRef_, const std::string& name) {
+    std::string baseRef = qualify_objref(objRef_);
+
     if (is_simple_ident(name)) {
-        return "$" + objRef_ + "." + name;
+        return baseRef + "." + name;
     }
     std::string escaped = escape_single_quotes(name);
-    return "$" + objRef_ + ".PSObject.Properties['" + escaped + "'].Value";
+    return baseRef + ".PSObject.Properties['" + escaped + "'].Value";
 }
 
 
 inline std::string build_method_invocation(const std::string& objRef_,
                                            const std::string& name,
                                            const std::vector<std::string>& args) {
+    std::string baseRef = qualify_objref(objRef_);
     std::string base;
+
     if (is_simple_ident(name)) {
-        base = "$" + objRef_ + "." + name;
+        base = baseRef + "." + name;
     } else {
         std::string escaped = escape_single_quotes(name);
-        base = "$" + objRef_ + ".PSObject.Methods['" + escaped + "'].Invoke";
+        base = baseRef + ".PSObject.Methods['" + escaped + "'].Invoke";
     }
 
     std::string command;
-    std::size_t estimated = base.size() + 2; // account for "()"
+    std::size_t estimated = base.size() + 2;
     for (const auto& arg : args) {
-        estimated += arg.size() + 2; // comma and space
+        estimated += arg.size() + 2;
     }
     command.reserve(estimated);
+
     command.append(base);
     command.push_back('(');
     for (std::size_t i = 0; i < args.size(); ++i) {
@@ -424,8 +651,10 @@ inline std::string build_method_invocation(const std::string& objRef_,
         command.append(args[i]);
     }
     command.push_back(')');
+
     return command;
 }
+
 
 
 inline void rstrip_newlines(std::string& s) {
@@ -459,20 +688,38 @@ PsProxy::MethodMeta PsProxy::decode_method(py::dict entry) const {
     MethodMeta meta{};
     py::object get = entry.attr("get");
 
+    // Hint om awaitable via navn som slutter på "Async"
     py::object nameObj = get("Name", py::none());
     if (py::isinstance<py::str>(nameObj)) {
-        const std::string name = py::cast<std::string>(nameObj);
-        if (name.size() >= 5 && name.rfind("Async") == name.size() - 5) {
+        const std::string nm = py::cast<std::string>(nameObj);
+        if (nm.size() >= 5 && nm.rfind("Async") == nm.size() - 5) {
             meta.awaitable = true;
         }
     }
 
-    py::object definitionObj = get("Definition", py::none());
-    if (py::isinstance<py::str>(definitionObj)) {
-        const std::string def = py::cast<std::string>(definitionObj);
+    py::object defObj = get("Definition", py::none());
+    if (py::isinstance<py::str>(defObj)) {
+        const std::string def = py::cast<std::string>(defObj);
+
+        // Return type = alt før første space
+        auto firstSpace = def.find(' ');
+        if (firstSpace != std::string::npos) {
+            meta.returnType = def.substr(0, firstSpace);
+        }
+
+        // Awaitable hint dersom Task/ValueTask
         if (def.find("System.Threading.Tasks.Task") != std::string::npos ||
             def.find("ValueTask") != std::string::npos) {
             meta.awaitable = true;
+        }
+
+        // Void?
+        {
+            std::string lower = meta.returnType;
+            for (auto &c : lower) c = (char)std::tolower((unsigned char)c);
+            if (lower == "void" || lower == "system.void") {
+                meta.returnsVoid = true;
+            }
         }
     }
 
@@ -588,10 +835,12 @@ std::string PsProxy::create_ps_object(const std::string& typeNameWithArgs) {
     // 3. Build a list of creation strategies
     std::vector<std::string> strategies;
     if (!args.empty()) {
+        strategies.push_back(psVar + " = $" + typeName + "' -ArgumentList " + args);
         strategies.push_back(psVar + " = New-Object -TypeName '" + typeName + "' -ArgumentList " + args + " -ErrorAction Stop");
         strategies.push_back(psVar + " = " + bracketedType + "::new(" + args + ")");
         strategies.push_back(psVar + " = " + bracketedType + "::New(" + args + ")");
     } else {
+        strategies.push_back(psVar + " = $" + typeName);
         strategies.push_back(psVar + " = New-Object -TypeName '" + typeName + "' -ErrorAction Stop");
         strategies.push_back(psVar + " = " + bracketedType + "::new()");
         strategies.push_back(psVar + " = " + bracketedType + "::New()");
@@ -607,6 +856,11 @@ std::string PsProxy::create_ps_object(const std::string& typeNameWithArgs) {
     for (const auto& cmd : strategies) {
         result = shell_.execute(cmd);
         if (result.success) {
+            std::string checkCmd = psVar + " | Get-Member -ErrorAction Stop";
+            auto checkResult = shell_.execute(checkCmd);
+            if (checkResult.out.empty() || !checkResult.success) {
+                continue; // Creation command succeeded but object is invalid
+            }
             success = true;
             VSHELL_DBG("PROXY", "Object creation succeeded with command: %s", cmd.c_str());
             break;
@@ -722,8 +976,10 @@ py::list PsProxy::multi_call(const py::function& func, py::args args) {
 }
 
 py::object PsProxy::bind_method(const std::string& name, const MethodMeta& meta) {
-    auto formatter = [this](py::handle h) { return format_argument(h); };
+    auto formatter   = [this](py::handle h) { return format_argument(h); };
     auto result_name = typeName_ + "." + name;
+
+    static std::atomic<uint32_t> globalCounter{0};
 
     return py::cpp_function(
         [this, meta, formatter, result_name, name](py::args args, py::kwargs kwargs) -> py::object {
@@ -731,27 +987,289 @@ py::object PsProxy::bind_method(const std::string& name, const MethodMeta& meta)
                 throw py::type_error("Proxy methods do not support keyword arguments");
             }
 
-            std::vector<std::string> psArgs;
-            psArgs.reserve(args.size());
-            for (auto item : args) {
-                psArgs.emplace_back(formatter(item));
+            struct OutBufInfo {
+                size_t      pyIndex; // index in args[]
+                std::string psVar;   // "__vs_buf_42"
+            };
+
+            std::vector<OutBufInfo> outBufs;
+            std::string allocLines;          // PS lines that declare temp vars BEFORE call
+            std::vector<std::string> finalPsArgs;
+            finalPsArgs.reserve(args.size());
+
+            auto calc_py_buf_len = [](py::handle h) -> size_t {
+                if (PyByteArray_Check(h.ptr())) {
+                    return (size_t)PyByteArray_GET_SIZE(h.ptr());
+                }
+                if (py::isinstance<py::bytes>(h)) {
+                    py::bytes b = h.cast<py::bytes>();
+                    std::string s = b; // copies
+                    return s.size();
+                }
+                if (py::isinstance<py::list>(h)) {
+                    return (size_t)py::len(h);
+                }
+                if (h.is_none()) return 0;
+                try { return (size_t)py::len(h); }
+                catch (...) { return 0; }
+            };
+
+            size_t nCallArgs = args.size();
+            for (size_t i = 0; i < nCallArgs; ++i) {
+                bool handled = false;
+
+                if (i < meta.params.size()) {
+                    bool handled = false;
+                    py::handle h = args[i]; // Hent Python-objektet
+
+                    // Refleksjons-flagg (vi trenger fortsatt pm.isArray)
+                    bool paramIsArray = false;
+                    bool paramIsOutOrRef = false;
+                    bool paramIsKnownByteIn = false;
+
+                    if (i < meta.params.size()) {
+                        const auto& pm = meta.params[i];
+                        paramIsArray = pm.isArray;
+                        paramIsOutOrRef = (pm.isOut || pm.isByRef);
+                        paramIsKnownByteIn = pm.isArray && !paramIsOutOrRef &&
+                            (pm.typeName == "System.Byte[]" || pm.typeName == "System.Byte[]" || pm.typeName == "System.Byte[]");
+                    }
+
+
+                    // ---- CASE A: out/ref buffer (Python 'bytearray') ----
+                    // Heuristikk: Hvis Python sender 'bytearray' og PS-metoden
+                    // forventer en array, antar vi at det er en out-buffer.
+                    if (paramIsArray && PyByteArray_Check(h.ptr()))
+                    {
+                        size_t bufLen = calc_py_buf_len(h);
+
+                        // fallback: hent size hint fra siste arg (ofte "count")
+                        if (bufLen == 0 && nCallArgs > 0) {
+                            py::handle lastArg = args[nCallArgs - 1];
+                            if (py::isinstance<py::int_>(lastArg)) {
+                                bufLen = (size_t)py::cast<int>(lastArg);
+                            }
+                        }
+
+                        uint32_t id = globalCounter++;
+                        std::string psVarBase = "__vs_buf_" + std::to_string(id);
+
+                        allocLines += "$" + psVarBase + " = New-Object byte[] " +
+                                    std::to_string(bufLen) + ";\n";
+
+                        finalPsArgs.push_back("$" + psVarBase);
+
+                        outBufs.push_back(OutBufInfo{
+                            i,              // which python arg maps to this buffer
+                            psVarBase       // powershell var name (no $)
+                        });
+
+                        handled = true;
+                    }
+                    // ---- CASE B: in buffer (Python 'bytes') ----
+                    // Heuristikk: Hvis Python sender 'bytes' og PS-metoden
+                    // forventer en 'in'-array, antar vi at det er en in-buffer.
+                    else if (paramIsArray && !paramIsOutOrRef && py::isinstance<py::bytes>(h))
+                    {
+                        // Bygg en statisk [byte[]](...) literal fra Python-argumentet
+                        std::string psLiteral = make_byte_array_literal_from_py(h);
+
+                        uint32_t id = globalCounter++;
+                        std::string psVarBase = "__vs_in_" + std::to_string(id);
+
+                        // $__vs_in_X = [byte[]](72,101,108,...)
+                        allocLines += "$" + psVarBase + " = " + psLiteral + ";\n";
+
+                        finalPsArgs.push_back("$" + psVarBase);
+                        handled = true;
+                    }
+                    // ---- CASE B (refleksjon): Fallback for 'in' array ----
+                    else if (!handled && paramIsKnownByteIn)
+                    {
+                        // (Samme som over, men trigget av refleksjon i stedet for py::bytes)
+                        std::string psLiteral = make_byte_array_literal_from_py(h);
+                        uint32_t id = globalCounter++;
+                        std::string psVarBase = "__vs_in_" + std::to_string(id);
+                        allocLines += "$" + psVarBase + " = " + psLiteral + ";\n";
+                        finalPsArgs.push_back("$" + psVarBase);
+                        handled = true;
+                    }
+                    // ---- CASE A (refleksjon): Fallback for 'out' list/etc ----
+                    else if (!handled && paramIsOutOrRef && py::isinstance<py::list>(h))
+                    {
+                        // (Logikk for [out] list[], etc. - duplisert fra CASE A over)
+                        size_t bufLen = calc_py_buf_len(h);
+                        // ... (samme logikk som CASE A)
+                        // ... (NB: Denne antar fortsatt New-Object byte[]...)
+                        // ... (Denne logikken var ufullstendig i din opprinnelige kode også)
+
+                        // For nå, la oss anta at [out] array alltid er byte[]
+                        uint32_t id = globalCounter++;
+                        std::string psVarBase = "__vs_buf_" + std::to_string(id);
+                        allocLines += "$" + psVarBase + " = New-Object byte[] " +
+                                    std::to_string(bufLen) + ";\n";
+                        finalPsArgs.push_back("$" + psVarBase);
+                        outBufs.push_back(OutBufInfo{ i, psVarBase });
+
+                        handled = true;
+                    }
+
+
+                    // ---- CASE C: alt annet (int, string, bool, etc.) ----
+                    if (!handled) {
+                        finalPsArgs.push_back(formatter(args[i]));
+                    }
+                } // slutt på if (i < meta.params.size())
+                else if (!handled) {
+                    // Fallback for args utenfor param-listen (CASE C)
+                    finalPsArgs.push_back(formatter(args[i]));
+                }
             }
 
-            std::string command = build_method_invocation(objRef_, name, psArgs);
-
-            if ( meta.awaitable) {
-                command = "(" + command + ").GetAwaiter().GetResult()";
+            // --- bygg selve metodekallet ( "$obj.Method(arg1,...)" ) ---
+            std::string callExpr = build_method_invocation(objRef_, name, finalPsArgs);
+            if (meta.awaitable) {
+                callExpr = "(" + callExpr + ").GetAwaiter().GetResult()";
             }
 
-            auto exec = shell_.execute(command);
-            if (!exec.success) {
-                throw py::value_error("PowerShell method '" + result_name + "' failed: " + exec.err);
+            // --- unikt returvariabelnavn ---
+            uint32_t retId = globalCounter++;
+            std::string retVarBase = "__vs_ret_" + std::to_string(retId);
+            std::string retVarPS   = "$" + retVarBase;
+
+            // --- script som kjøres i PowerShell ---
+            // allocLines:
+            //   $__vs_in_12 = [byte[]](72,101,...)
+            //   $__vs_buf_13 = New-Object byte[] 30
+            // call + ret:
+            //   $__vs_ret_99 = $obj.Method($__vs_in_12, $__vs_buf_13, 0, 30);
+            std::string psScript;
+            psScript.reserve(allocLines.size() + callExpr.size() + 64);
+            psScript.append(allocLines);
+            psScript.append(retVarPS);
+            psScript.append(" = ");
+            psScript.append(callExpr);
+            psScript.append(";\n");
+
+            auto execMain = shell_.execute(psScript);
+            if (!execMain.success) {
+                throw py::value_error(
+                    "PowerShell method '" + result_name + "' failed: " + execMain.err);
             }
 
-            return coerce_scalar(exec.out);
-        },
-        py::name(name.c_str()));
+            // --- finn python-returverdi ---
+            py::object pyReturn = py::none();
+
+            if (!meta.returnsVoid) {
+                if (is_ps_scalar_type(meta.returnType)) {
+                    // f.eks. ReadArray(...) returnerer int (# of bytes read)
+                    auto execRet = shell_.execute(retVarPS);
+                    if (!execRet.success) {
+                        throw py::value_error(
+                            "PowerShell method '" + result_name + "' failed (read ret): " + execRet.err);
+                    }
+                    pyReturn = coerce_scalar(execRet.out);
+                } else {
+                    // kompleks .NET-objekt → ny proxy til retVarPS
+                    auto newProxyPtr = make_ps_proxy(shell_, meta.returnType, retVarPS, 4);
+                    pyReturn = py::cast(newProxyPtr);
+                }
+            }
+
+            // --- sync tilbake out/ref byte[] (ReadArray-scenario) ---
+            if (!outBufs.empty()) {
+                // Bygg en liten liste av { Id = 0; Data = $__vs_buf_x }
+                std::string dumpScript;
+                dumpScript += "@(";
+                for (size_t idx = 0; idx < outBufs.size(); ++idx) {
+                    if (idx) dumpScript += ",";
+                    dumpScript += "[pscustomobject]@{ Id=" + std::to_string(idx)
+                                + "; Data=$" + outBufs[idx].psVar + " }";
+                }
+                dumpScript += ") | ConvertTo-Json -Compress -Depth 6\n";
+
+                auto execDump = shell_.execute(dumpScript);
+                if (!execDump.success) {
+                    throw py::value_error(
+                        "PowerShell dump of out buffers failed: " + execDump.err);
+                }
+
+                if (!execDump.out.empty()) {
+                    try {
+                        py::object json_mod = py::module_::import("json");
+                        py::object parsed   = json_mod.attr("loads")(py::str(execDump.out));
+
+                        py::list bufList;
+                        if (py::isinstance<py::list>(parsed)) {
+                            bufList = parsed.cast<py::list>();
+                        } else {
+                            bufList = py::list();
+                            bufList.append(parsed);
+                        }
+
+                        for (size_t idx = 0; idx < outBufs.size(); ++idx) {
+                            if (idx >= (size_t)py::len(bufList)) break;
+
+                            const auto& info = outBufs[idx];
+                            py::object elem   = bufList[idx];
+
+                            py::object dataListObj = elem.attr("__getitem__")("Data");
+                            py::list   dataList    = dataListObj.cast<py::list>();
+
+                            std::vector<uint8_t> vec;
+                            vec.reserve(py::len(dataList));
+                            for (auto v : dataList) {
+                                vec.push_back((uint8_t)py::cast<int>(v));
+                            }
+
+                            py::handle targetPyBuf = args[info.pyIndex];
+
+                            // skriv tilbake til kallers mutable buffer
+                            if (PyByteArray_Check(targetPyBuf.ptr())) {
+                                if (PyByteArray_Resize(
+                                        targetPyBuf.ptr(),
+                                        (Py_ssize_t)vec.size()) != 0)
+                                {
+                                    throw py::error_already_set();
+                                }
+                                char* pyBufPtr = PyByteArray_AS_STRING(targetPyBuf.ptr());
+                                std::memcpy(pyBufPtr, vec.data(), vec.size());
+                            }
+                            else if (py::isinstance<py::list>(targetPyBuf)) {
+                                py::list pyList = targetPyBuf.cast<py::list>();
+                                pyList.attr("clear")();
+                                for (uint8_t b : vec) {
+                                    pyList.append(py::int_(b));
+                                }
+                            }
+                            else {
+                                std::ostringstream oss;
+                                oss << "Argument at index " << info.pyIndex
+                                    << " for method '" << name
+                                    << "' was used as an out/ref buffer "
+                                       "but is not a mutable bytearray/list.";
+                                throw py::type_error(oss.str());
+                            }
+                        }
+                    } catch (const py::error_already_set& e) {
+                        throw std::runtime_error(
+                            std::string("Python error parsing out-buffers: ") + e.what());
+                    } catch (const std::exception& e) {
+                        throw std::runtime_error(
+                            std::string("C++ error parsing out-buffers: ") + e.what());
+                    }
+                }
+            }
+
+            return pyReturn;
+        }
+    );
 }
+
+
+
+
+
 
 py::object PsProxy::read_property(const std::string& name) const {
     std::string cmd = build_property_expr(objRef_, name);

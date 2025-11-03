@@ -39,10 +39,11 @@ endif()
 set(REQ_PY
   cpp/include/py_bridge.hpp
   cpp/include/py_proxy.hpp
+  cpp/include/mem/shared_memory.hpp
 )
 
 pybind11_add_module(_core MODULE ${SRC} ${REQ_PY})
-target_include_directories(_core PRIVATE cpp/include)
+target_include_directories(_core PRIVATE cpp/include cpp/include/mem)
 
 if(UNIX)
   find_package(Threads REQUIRED)

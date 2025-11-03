@@ -210,7 +210,13 @@ bool VirtualShell::start() {
         std::lock_guard<std::mutex> errLock(stderrMx_);
         stderrQueue_.clear();
     }
-
+    #ifdef _WIN32
+        auto Handle = process->native_process_handle();
+        DWORD pid = GetProcessId(Handle);
+        pid_.store(static_cast<int64_t>(pid), std::memory_order_release);
+    #else
+        pid_.store(process->native_pid(), std::memory_order_release);
+    #endif
     process_ = std::move(process);
     isRunning_.store(true, std::memory_order_release);
     lifecycleGate_.store(false, std::memory_order_release);
@@ -237,6 +243,8 @@ bool VirtualShell::start() {
 
     return true;
 }
+
+
 
 void VirtualShell::stop(bool force) {
     std::unique_lock<std::mutex> stopLock(stopMx_);
