@@ -245,7 +245,6 @@ inline py::object make_py_runtime_error(const std::string& msg) {
     return builtins.attr("RuntimeError")(py::str(msg));
 }
 
-// ---- replace your make_py_future_from_std_future<T> with this version ----
 template <class T>
 py::object make_py_future_from_std_future(std::future<T> fut, py::object py_callback /* may be None */) {
     // Create the Python Future now (under GIL).
