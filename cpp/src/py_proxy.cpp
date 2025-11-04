@@ -462,8 +462,7 @@ PsProxy::PsProxy(VirtualShell& shell,
         VSHELL_DBG("PROXY","Cache hit for key1: %s", typeName_.c_str());
         return;
     }
-
-    // 2) Miss: try cache with "real" type name
+// 2) Miss: try cache with "real" type name
     const std::string realType = get_real_ps_type(shell_, objRef_, typeName_);
     CacheKey key2{ shellId, realType, depth };
     if (auto cached = g_schema_cache.get(key2)) {
