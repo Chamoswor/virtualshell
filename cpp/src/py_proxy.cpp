@@ -91,9 +91,7 @@ py::object coerce_scalar(std::string value) {
     return py::str(value);
 }
 
-// 1) Sørge for at vi kan bygge en PowerShell "[byte[]](...)" literal.
 static std::string make_byte_array_literal_from_py(py::handle h) {
-    // Henter bytes ut av Python-objektet (bytearray, bytes, list[int], ...)
     std::vector<unsigned int> vals;
 
     if (PyByteArray_Check(h.ptr())) {
@@ -117,7 +115,7 @@ static std::string make_byte_array_literal_from_py(py::handle h) {
             vals.push_back((unsigned int)py::cast<int>(item)); // assume 0..255
         }
     } else {
-        // fallback: prøv å tolke som bytes(str(...))
+        
         std::string s = py::cast<std::string>(py::str(h));
         vals.reserve(s.size());
         for (unsigned char c : s) {
@@ -125,7 +123,6 @@ static std::string make_byte_array_literal_from_py(py::handle h) {
         }
     }
 
-    // Lag noe som [byte[]](72,101,108,...)
     std::string ps = "[byte[]](";
     for (size_t i = 0; i < vals.size(); ++i) {
         if (i) ps += ",";
@@ -226,7 +223,6 @@ struct SignatureInfo {
 
 static std::atomic<uint32_t> sigCounter{0};
 
-// Reflekter metainformasjon for en metode (første overload vi finner)
 static SignatureInfo reflect_signature_for(
     VirtualShell& shell,
     const std::string& objRef,      // uten '$', f.eks. "proxy_obj_3"
@@ -234,10 +230,6 @@ static SignatureInfo reflect_signature_for(
 {
     SignatureInfo sig;
 
-    // Bygg PowerShell som kjører refleksjon:
-    // - Henter alle metoder som heter <methodName>
-    // - For hver: samler ReturnType + liste av parametre
-    // - Dumper som JSON
     std::string safeName = escape_single_quotes(methodName);
     std::string ps;
     ps += "$__vs_obj = $" + ensure_dollar(objRef) + ";\n";
@@ -430,7 +422,6 @@ static bool is_ps_scalar_type(const std::string& t)
         lower == "system.single")                                     return true;
     if (lower == "decimal"         || lower == "system.decimal")         return true;
 
-    // Kan utvides ved behov
     return false;
 }
 
@@ -706,7 +697,6 @@ PsProxy::MethodMeta PsProxy::decode_method(py::dict entry) const {
             meta.returnType = def.substr(0, firstSpace);
         }
 
-        // Awaitable hint dersom Task/ValueTask
         if (def.find("System.Threading.Tasks.Task") != std::string::npos ||
             def.find("ValueTask") != std::string::npos) {
             meta.awaitable = true;
