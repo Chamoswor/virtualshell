@@ -34,7 +34,6 @@ bool matches_flag(long value, const long* begin, const long* end) {
     return false;
 }
 
-// I anonymous namespace øverst i fila (samme sted som dump_members ligger i dag)
 static std::string ensure_dollar(const std::string& nameOrVar) {
     if (!nameOrVar.empty() && nameOrVar[0] == '$') {
         return nameOrVar;  // allerede "$foo"
