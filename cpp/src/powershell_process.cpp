@@ -25,7 +25,7 @@ using namespace std::chrono_literals;
 namespace virtualshell {
 namespace core {
 namespace {
-constexpr std::size_t kReadBufferSize = 64 * 1024;
+constexpr std::size_t kReadBufferSize = 64 * 1024 * 10; // 640 KB read buffer size   
 
 std::string quote_argument(const std::string& value) {
     if (value.empty()) {

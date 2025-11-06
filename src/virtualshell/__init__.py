@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .shell import ExecutionResult, BatchProgress, Shell, ExitCode, SharedMemoryChannel, create_shared_memory_channel
-    from .shared_memory_bridge import SharedMemoryBridge
+    from .shared_memory_bridge import SharedMemoryBridge, PublishResult, ZeroCopyView
 
 try:
     from ._version import version as __version__
@@ -23,7 +23,8 @@ __all__ = [
     "VirtualShellError", "PowerShellNotFoundError",
     "ExecutionTimeoutError", "ExecutionError",
     "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode",
-    "SharedMemoryChannel", "create_shared_memory_channel", "SharedMemoryBridge",
+    "SharedMemoryChannel", "create_shared_memory_channel", 
+    "SharedMemoryBridge", "PublishResult", "ZeroCopyView",
 ]
 
 def __getattr__(name: str):
@@ -32,7 +33,7 @@ def __getattr__(name: str):
         obj = getattr(mod, name)
         globals()[name] = obj
         return obj
-    if name == "SharedMemoryBridge":
+    if name in {"SharedMemoryBridge", "PublishResult", "ZeroCopyView"}:
         mod = import_module(".shared_memory_bridge", __name__)
         obj = getattr(mod, name)
         globals()[name] = obj
