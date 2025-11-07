@@ -1,5 +1,5 @@
 // src/vs_shm.cpp
-#if not defined(WIN32_LEAN_AND_MEAN)
+#ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
 #endif
 
@@ -145,6 +145,17 @@ VS_API VS_Channel VS_OpenChannel(const wchar_t* name,
         atomic_store_u64(reinterpret_cast<volatile LONG64*>(&ch->hdr->powershell_seq), 0);
         atomic_store_u64(reinterpret_cast<volatile LONG64*>(&ch->hdr->python_length), 0);
         atomic_store_u64(reinterpret_cast<volatile LONG64*>(&ch->hdr->powershell_length), 0);
+        // Initialize offset-based fields
+        atomic_store_u64(reinterpret_cast<volatile LONG64*>(&ch->hdr->ps_data_offset), 0);
+        atomic_store_u64(reinterpret_cast<volatile LONG64*>(&ch->hdr->ps_data_length), 0);
+        atomic_store_u64(reinterpret_cast<volatile LONG64*>(&ch->hdr->ps_data_seq), 0);
+        ch->hdr->ps_data_valid = 0;
+        
+        // Initialize chunked transfer fields
+        InterlockedExchange(reinterpret_cast<volatile LONG*>(&ch->hdr->ps_chunk_index), 0);
+        atomic_store_u64(reinterpret_cast<volatile LONG64*>(&ch->hdr->ps_total_size), 0);
+        atomic_store_u64(reinterpret_cast<volatile LONG64*>(&ch->hdr->ps_chunk_size), 0);
+        atomic_store_u64(reinterpret_cast<volatile LONG64*>(&ch->hdr->ps_num_chunks), 0);
     } else if (ch->hdr->frame_bytes != frame_bytes) {
         return nullptr; // incompatible frame size
     }
@@ -385,7 +396,366 @@ VS_API int32_t VS_GetHeader(VS_Channel ch, VS_Header* out) {
     snapshot.powershell_seq = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->powershell_seq));
     snapshot.python_length = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->python_length));
     snapshot.powershell_length = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->powershell_length));
+    
+    // Copy offset-based data metadata atomically
+    snapshot.ps_data_offset = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_offset));
+    snapshot.ps_data_length = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_length));
+    snapshot.ps_data_seq = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_seq));
+    snapshot.ps_data_valid = c->hdr->ps_data_valid;
+    
+    // Copy chunked transfer metadata
+    snapshot.ps_chunk_index = (uint32_t)InterlockedCompareExchange(
+        reinterpret_cast<volatile LONG*>(&c->hdr->ps_chunk_index), 0, 0);
+    snapshot.ps_total_size = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_total_size));
+    snapshot.ps_chunk_size = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_chunk_size));
+    snapshot.ps_num_chunks = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_num_chunks));
+    
     memcpy(snapshot.reserved, c->hdr->reserved, sizeof(snapshot.reserved));
     *out = snapshot;
     return VS_OK;
+}
+
+// ============================================================================
+// Zero-copy offset-based data transfer implementation
+// ============================================================================
+
+VS_API int32_t VS_SetDataOffset(VS_Channel ch, uint64_t byte_offset, uint64_t byte_length) {
+    if (!ch) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    int lk = lock_mutex(c->hMutex, 5000);
+    if (lk != VS_OK) return lk;
+    
+    // Set offset metadata atomically
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_offset), byte_offset);
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_length), byte_length);
+    
+    // Use InterlockedExchange to ensure visibility across processes
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&c->hdr->ps_data_valid), 1);
+    
+    // Increment sequence to signal new data available
+    uint64_t seq = atomic_inc_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_seq));
+    
+    unlock_mutex(c->hMutex);
+    
+    // Signal Python that data is ready
+    if (c->evPsReq) {
+        SetEvent(c->evPsReq);
+    }
+    
+    return VS_OK;
+}
+
+VS_API int32_t VS_GetDataOffset(VS_Channel ch,
+                                uint64_t* out_byte_offset,
+                                uint64_t* out_byte_length,
+                                uint64_t* out_seq) {
+    if (!ch || !out_byte_offset || !out_byte_length || !out_seq) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    // Read atomically
+    *out_byte_offset = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_offset));
+    *out_byte_length = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_length));
+    *out_seq = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_seq));
+    
+    // Use InterlockedCompareExchange to read atomically
+    LONG valid = InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&c->hdr->ps_data_valid), 0, 0);
+    return (valid == 1) ? VS_OK : VS_BAD_STATE;
+}
+
+VS_API int32_t VS_AckDataOffset(VS_Channel ch) {
+    if (!ch) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    // Signal PowerShell that Python is done reading
+    if (c->evPsAck) {
+        SetEvent(c->evPsAck);
+    }
+    
+    return VS_OK;
+}
+
+VS_API int32_t VS_WaitForDataOffset(VS_Channel ch, uint32_t timeout_ms) {
+    if (!ch) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    if (!c->evPsReq) return VS_BAD_STATE;
+    
+    // Wait for PowerShell to signal data is ready
+    DWORD wait_result = WaitForSingleObject(c->evPsReq, timeout_ms);
+    if (wait_result == WAIT_OBJECT_0) {
+        ResetEvent(c->evPsReq);
+        return VS_OK;
+    }
+    else if (wait_result == WAIT_TIMEOUT) {
+        return VS_TIMEOUT;
+    }
+    else {
+        return VS_SYS_ERROR;
+    }
+}
+
+VS_API int32_t VS_WaitForDataOffsetAck(VS_Channel ch, uint32_t timeout_ms) {
+    if (!ch) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    if (!c->evPsAck) return VS_BAD_STATE;
+    
+    DWORD wait_result = WaitForSingleObject(c->evPsAck, timeout_ms);
+    if (wait_result == WAIT_OBJECT_0) {
+        ResetEvent(c->evPsAck);
+        return VS_OK;
+    }
+    else if (wait_result == WAIT_TIMEOUT) {
+        return VS_TIMEOUT;
+    }
+    else {
+        return VS_SYS_ERROR;
+    }
+}
+
+VS_API int32_t VS_ClearDataOffset(VS_Channel ch) {
+    if (!ch) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    int lk = lock_mutex(c->hMutex, 5000);
+    if (lk != VS_OK) return lk;
+    
+    // Clear offset metadata
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_offset), 0);
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_length), 0);
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&c->hdr->ps_data_valid), 0);
+    
+    unlock_mutex(c->hMutex);
+    
+    return VS_OK;
+}
+
+VS_API void* VS_GetSharedMemoryBase(VS_Channel ch) {
+    if (!ch) return nullptr;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    return c->base;
+}
+
+// ============================================================================
+// CHUNKED TRANSFER API (Always-On Chunking)
+// ============================================================================
+
+VS_API int32_t VS_BeginChunkedTransfer(VS_Channel ch,
+                                       uint64_t total_size,
+                                       uint64_t chunk_size) {
+    if (!ch || total_size == 0 || chunk_size == 0) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    int lk = lock_mutex(c->hMutex, 5000);
+    if (lk != VS_OK) return lk;
+    
+    // Calculate number of chunks
+    uint64_t num_chunks = (total_size + chunk_size - 1) / chunk_size;
+    
+    // Set transfer metadata
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_total_size), total_size);
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_chunk_size), chunk_size);
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_num_chunks), num_chunks);
+    
+    // Reset chunk state
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&c->hdr->ps_chunk_index), 0);
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&c->hdr->ps_data_valid), 0);
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_seq), 0);
+    
+    unlock_mutex(c->hMutex);
+    
+    return VS_OK;
+}
+
+VS_API int32_t VS_SendChunk(VS_Channel ch,
+                            uint32_t chunk_index,
+                            const uint8_t* data,
+                            uint64_t length,
+                            uint32_t timeout_ms) {
+    if (!ch || !data || length == 0) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    int lk = lock_mutex(c->hMutex, 5000);
+    if (lk != VS_OK) return lk;
+    
+    // Copy data to PS→PY buffer
+    uint64_t ps2py_offset = sizeof(VS_Header) + c->hdr->frame_bytes;
+    if (length > c->hdr->frame_bytes) {
+        unlock_mutex(c->hMutex);
+        return VS_INVALID_ARG; // Chunk too large for frame
+    }
+    
+    memcpy(c->base + ps2py_offset, data, (size_t)length);
+    
+    // Set chunk metadata
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_offset), ps2py_offset);
+    atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_length), length);
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&c->hdr->ps_chunk_index), (LONG)chunk_index);
+    
+    // Increment sequence and mark valid
+    uint64_t seq = atomic_inc_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_seq));
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&c->hdr->ps_data_valid), 1);
+    
+    unlock_mutex(c->hMutex);
+    
+    // Signal Python that chunk is ready
+    if (c->evPsReq) {
+        SetEvent(c->evPsReq);
+    }
+    
+    // Wait for Python ACK
+    if (!c->evPsAck) return VS_BAD_STATE;
+    
+    DWORD wait_result = WaitForSingleObject(c->evPsAck, timeout_ms);
+    if (wait_result == WAIT_OBJECT_0) {
+        ResetEvent(c->evPsAck);
+        return VS_OK;
+    }
+    else if (wait_result == WAIT_TIMEOUT) {
+        return VS_TIMEOUT;
+    }
+    else {
+        return VS_SYS_ERROR;
+    }
+}
+
+VS_API int32_t VS_WaitForChunk(VS_Channel ch,
+                               uint32_t* out_chunk_index,
+                               uint64_t* out_offset,
+                               uint64_t* out_length,
+                               uint32_t timeout_ms) {
+    if (!ch || !out_chunk_index || !out_offset || !out_length) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    if (!c->evPsReq) return VS_BAD_STATE;
+    
+    // Wait for PowerShell to signal chunk ready
+    DWORD wait_result = WaitForSingleObject(c->evPsReq, timeout_ms);
+    if (wait_result == WAIT_OBJECT_0) {
+        ResetEvent(c->evPsReq);
+        
+        // Read chunk metadata atomically
+        *out_offset = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_offset));
+        *out_length = atomic_load_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->ps_data_length));
+        *out_chunk_index = (uint32_t)InterlockedCompareExchange(
+            reinterpret_cast<volatile LONG*>(&c->hdr->ps_chunk_index), 0, 0);
+        
+        // Check if data is valid
+        LONG valid = InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&c->hdr->ps_data_valid), 0, 0);
+        if (valid != 1) {
+            return VS_BAD_STATE;
+        }
+        
+        return VS_OK;
+    }
+    else if (wait_result == WAIT_TIMEOUT) {
+        return VS_TIMEOUT;
+    }
+    else {
+        return VS_SYS_ERROR;
+    }
+}
+
+VS_API int32_t VS_AckChunk(VS_Channel ch) {
+    if (!ch) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    // Clear valid flag
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&c->hdr->ps_data_valid), 0);
+    
+    // Signal PowerShell that Python is done with this chunk
+    if (c->evPsAck) {
+        SetEvent(c->evPsAck);
+    }
+    
+    return VS_OK;
+}
+
+// ============================================================================
+// Helper: Serialize PSObject to JSON bytes using .NET
+// ============================================================================
+
+// Forward declarations for C++/CLI functions (same DLL, just extern)
+extern "C" {
+    extern int SerializeManagedObject(void* obj_ptr, const wchar_t* encoding_name, uint8_t** out_bytes, uint64_t* out_len);
+    extern int SerializeObjectViaGCHandle(intptr_t gc_handle, const wchar_t* encoding_name, uint8_t** out_bytes, uint64_t* out_len);
+    extern int WriteByteArrayDirect(intptr_t gc_handle, uint8_t* dest_ptr, uint64_t max_len, uint64_t* out_len);
+    extern void FreeManagedBytes(uint8_t* bytes);
+}
+
+// Fast serialization path: PowerShell object → bytes via C++/CLI
+VS_API int32_t VS_WriteObjectPs2Py(VS_Channel ch,
+                                   intptr_t gc_handle_ptr,  // GCHandle as IntPtr (from PowerShell)
+                                   uint32_t timeout_ms,
+                                   uint64_t* next_seq,
+                                   uint64_t* out_serialized_len)
+{
+    if (!ch || !gc_handle_ptr) return VS_INVALID_ARG;
+    Channel* c = reinterpret_cast<Channel*>(ch);
+    
+    // OPTIMIZATION: Try zero-copy write for byte arrays first!
+    // WriteByteArrayDirect writes directly to shared memory (no malloc/free)
+    uint64_t direct_len = 0;
+    uint8_t* ps2py_region = c->ps2p;  // PS→PY shared memory region
+    int direct_result = WriteByteArrayDirect(gc_handle_ptr, ps2py_region, c->hdr->frame_bytes, &direct_len);
+    
+    // Debug output
+    fprintf(stderr, "[VS_WriteObjectPs2Py] WriteByteArrayDirect returned: %d, direct_len: %llu\n", direct_result, direct_len);
+    
+    if (direct_result == 0 && direct_len > 0) {
+        fprintf(stderr, "[VS_WriteObjectPs2Py] ZERO-COPY SUCCESS! Wrote %llu bytes directly\n", direct_len);
+        // Success! byte[] was written directly to shared memory (ZERO-COPY!)
+        // Now update header manually (don't use write_direction as it would copy again!)
+        
+        int lk = lock_mutex(c->hMutex, timeout_ms);
+        if (lk != VS_OK) return lk;
+        
+        // Atomic update of length and sequence
+        atomic_store_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->powershell_length), direct_len);
+        uint64_t seq_value = atomic_inc_u64(reinterpret_cast<volatile LONG64*>(&c->hdr->powershell_seq));
+        if (next_seq) *next_seq = seq_value;
+        
+        unlock_mutex(c->hMutex);
+        
+        // Signal event to wake Python consumer
+        if (c->evPsReq) {
+            SetEvent(c->evPsReq);
+        }
+        
+        if (out_serialized_len) {
+            *out_serialized_len = direct_len;
+        }
+        
+        return VS_OK;
+    }
+    
+    // Fallback: Not a byte array or error - use serialization path
+    fprintf(stderr, "[VS_WriteObjectPs2Py] Fallback to serialization (not byte[] or error: %d)\n", direct_result);
+    uint8_t* serialized_bytes = nullptr;
+    uint64_t serialized_len = 0;
+    
+    // Call C++/CLI serializer (uses GCHandle to get actual object, not __ComObject wrapper)
+    int serialize_result = SerializeObjectViaGCHandle(gc_handle_ptr, L"utf-8", &serialized_bytes, &serialized_len);
+    if (serialize_result != 0 || !serialized_bytes) {
+        return VS_BAD_STATE;
+    }
+    
+    // Check if serialized data fits in frame
+    if (serialized_len > c->hdr->frame_bytes) {
+        FreeManagedBytes(serialized_bytes);
+        return VS_INVALID_ARG;
+    }
+    
+    // Write to shared memory
+    int write_result = write_direction(c, /*ps_to_py*/true, serialized_bytes, serialized_len, timeout_ms, next_seq);
+    
+    if (out_serialized_len) {
+        *out_serialized_len = serialized_len;
+    }
+    
+    // Free the temporary buffer
+    FreeManagedBytes(serialized_bytes);
+    
+    return write_result;
 }

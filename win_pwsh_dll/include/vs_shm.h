@@ -1,100 +1,237 @@
-// include/vs_shm.h
+// vs_shm.h - Zero-Copy Shared Memory API (Clean Redesign)
+// ================================================
+// Design principles:
+// 1. Python owns channel lifecycle (creates/destroys)
+// 2. All transfers use chunking (consistent, predictable)
+// 3. Zero-copy via offset-based shared memory access
+// 4. PowerShell serializes objects to bytes via C++/CLI
+
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
-#if defined(_WIN32)
+
+#ifdef _WIN32
   #define VS_API extern "C" __declspec(dllexport)
 #else
   #define VS_API extern "C"
 #endif
 
-static const uint32_t VS_HEADER_MAGIC = 0x4D485356u; // 'VSHM'
-static const uint32_t VS_HEADER_VERSION = 1u;
+// =============================================================================
+// CONSTANTS
+// =============================================================================
 
-// Opaque handle
+static const uint32_t VS_MAGIC = 0x5653484D;  // 'VSHM'
+static const uint32_t VS_VERSION = 2;
+
+static const uint32_t VS_DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;  // 4 MB
+static const uint32_t VS_DEFAULT_FRAME_SIZE = 64 * 1024 * 1024; // 64 MB
+
+// =============================================================================
+// STATUS CODES
+// =============================================================================
+
+enum VS_Status : int32_t {
+    VS_OK            =  0,
+    VS_TIMEOUT       =  1,
+    VS_WOULD_BLOCK   =  2,
+    VS_ERR_INVALID   = -1,
+    VS_ERR_SYSTEM    = -2,
+    VS_ERR_BAD_STATE = -3,
+    VS_ERR_TOO_LARGE = -4
+};
+
+// =============================================================================
+// HEADER STRUCTURE
+// =============================================================================
+
+struct VS_Header {
+    uint32_t magic;            // 'VSHM' marker
+    uint32_t version;          // Protocol version (2)
+    uint64_t frame_bytes;      // Size of data region per direction
+    
+    // Python → PowerShell transfer state (48 bytes)
+    struct {
+        uint64_t total_size;   // Total bytes to transfer
+        uint64_t chunk_size;   // Bytes per chunk
+        uint32_t num_chunks;   // Total number of chunks
+        uint32_t current_chunk;// Current chunk index (0-based)
+        uint64_t chunk_offset; // Offset in shared memory for current chunk
+        uint64_t chunk_length; // Length of current chunk
+        uint32_t chunk_ready;  // 1 = chunk available, 0 = none
+        uint32_t transfer_done;// 1 = all chunks sent, 0 = in progress
+    } py2ps;
+    
+    // PowerShell → Python transfer state (48 bytes)
+    struct {
+        uint64_t total_size;
+        uint64_t chunk_size;
+        uint32_t num_chunks;
+        uint32_t current_chunk;
+        uint64_t chunk_offset;
+        uint64_t chunk_length;
+        uint32_t chunk_ready;
+        uint32_t transfer_done;
+    } ps2py;
+    
+    uint64_t reserved[10];      // Future use (80 bytes to reach 192 total)
+};
+
+// Total: 4+4+8 + 48 + 48 + 80 = 192 bytes
+static_assert(sizeof(VS_Header) == 192, "VS_Header must be 192 bytes");
+
+// =============================================================================
+// CHANNEL HANDLE
+// =============================================================================
+
 typedef void* VS_Channel;
 
-// Return codes
-enum VS_Status : int32_t {
-    VS_OK                  = 0,
-    VS_TIMEOUT             = 1,
-    VS_WOULD_BLOCK         = 2,
-    VS_SMALL_BUFFER        = 3,
-    VS_INVALID_ARG         = -1,
-    VS_SYS_ERROR           = -2,
-    VS_BAD_STATE           = -3
-};
+// =============================================================================
+// CHANNEL LIFECYCLE (Python side)
+// =============================================================================
 
-// Header (mirrors the mapped layout)
-struct VS_Header {
-  union {
-    struct {
-      uint32_t magic;      // 'VSHM' marker
-      uint32_t version;    // protocol version
-    };
-    uint64_t magic_and_version; // compatibility with legacy writers
-  };
-  uint64_t frame_bytes;       // payload bytes per frame
-  uint64_t python_seq;        // last PY→PS write seq (legacy python_seq)
-  uint64_t powershell_seq;    // last PS→PY write seq (legacy powershell_seq)
-  uint64_t python_length;     // length of last PY→PS payload
-  uint64_t powershell_length; // length of last PS→PY payload
-  uint64_t reserved[10];      // reserved / legacy padding
-  // layout: [header][PY2P region][PS2P region]
-};
+// Create channel - Python owns lifecycle
+// name: e.g. "Local\\VS_Channel_123" or "Global\\VS_Channel_123"
+// frame_bytes: size of data region per direction (default: 64 MB)
+VS_API VS_Channel VS_CreateChannel(
+    const wchar_t* name,
+    uint64_t frame_bytes
+);
 
-#if defined(__cplusplus)
-static_assert(sizeof(VS_Header) == 128, "VS_Header must be 128 bytes");
-#endif
+// Close channel - Python calls this when done
+VS_API void VS_DestroyChannel(VS_Channel ch);
 
-// Open or create a channel.
-//
-// name: e.g. "Local\\VS:MMF:MyChannel" or "Global\\VS:MMF:MyChannel"
-// frame_bytes: per-frame payload capacity (e.g. 64*1024*1024)
-// num_slots: number of frames per direction (>=1)
-// use_global_fallback: if nonzero and CreateFileMappingW with Global\ fails w/ ERROR_ACCESS_DENIED,
-//                      retry with Local\ automatically.
-//
-// Returns nullptr on error.
-VS_API VS_Channel VS_OpenChannel(const wchar_t* name,
-                                 uint64_t frame_bytes,
-                                 uint32_t num_slots,
-                                 int      use_global_fallback);
+// =============================================================================
+// PYTHON → POWERSHELL TRANSFER
+// =============================================================================
 
-// Close & free resources (safe to pass nullptr)
-VS_API void VS_CloseChannel(VS_Channel ch);
+// Begin chunked transfer (Python side)
+// Sets up metadata for PowerShell to read chunks
+VS_API int32_t VS_BeginPy2PsTransfer(
+    VS_Channel ch,
+    uint64_t total_size,
+    uint64_t chunk_size
+);
 
-// Blocking write PowerShell→Python
-// data/len: payload to write
-// timeout_ms: 0=nonblocking, INFINITE=wait forever
-// next_seq(out): returns new seq counter (seq_ps after write)
-VS_API int32_t VS_WritePs2Py(VS_Channel ch,
-                             const uint8_t* data,
-                             uint64_t len,
-                             uint32_t timeout_ms,
-                             uint64_t* next_seq);
+// Send one chunk (Python side)
+// chunk_index: 0-based chunk number
+// data: chunk data to copy into shared memory
+// length: size of this chunk
+VS_API int32_t VS_SendPy2PsChunk(
+    VS_Channel ch,
+    uint32_t chunk_index,
+    const uint8_t* data,
+    uint64_t length,
+    uint32_t timeout_ms
+);
 
-// Blocking read Python→PowerShell
-// dst/dst_cap: user buffer. out_len returns payload length copied.
-// If dst_cap is smaller than payload, returns VS_SMALL_BUFFER and out_len set to required length (no copy).
-VS_API int32_t VS_ReadPy2Ps(VS_Channel ch,
-                            uint8_t* dst,
-                            uint64_t dst_cap,
-                            uint64_t* out_len,
-                            uint32_t timeout_ms);
+// Wait for PowerShell to acknowledge chunk (Python side)
+VS_API int32_t VS_WaitPy2PsAck(
+    VS_Channel ch,
+    uint32_t timeout_ms
+);
 
-// Nonblocking probe: get header snapshot
+// Mark transfer complete (Python side)
+VS_API int32_t VS_FinishPy2PsTransfer(VS_Channel ch);
+
+// =============================================================================
+// POWERSHELL → PYTHON TRANSFER
+// =============================================================================
+
+// Begin chunked transfer (PowerShell side)
+VS_API int32_t VS_BeginPs2PyTransfer(
+    VS_Channel ch,
+    uint64_t total_size,
+    uint64_t chunk_size
+);
+
+// Send one chunk (PowerShell side)
+VS_API int32_t VS_SendPs2PyChunk(
+    VS_Channel ch,
+    uint32_t chunk_index,
+    const uint8_t* data,
+    uint64_t length,
+    uint32_t timeout_ms
+);
+
+// Wait for Python to acknowledge chunk (PowerShell side)
+VS_API int32_t VS_WaitPs2PyAck(
+    VS_Channel ch,
+    uint32_t timeout_ms
+);
+
+// Mark transfer complete (PowerShell side)
+VS_API int32_t VS_FinishPs2PyTransfer(VS_Channel ch);
+
+// =============================================================================
+// ZERO-COPY RECEIVE (Python side reads PowerShell chunks)
+// =============================================================================
+
+// Wait for next chunk from PowerShell
+// Returns offset and length in shared memory - Python can read directly
+VS_API int32_t VS_WaitPs2PyChunk(
+    VS_Channel ch,
+    uint32_t* out_chunk_index,
+    uint64_t* out_offset,
+    uint64_t* out_length,
+    uint32_t timeout_ms
+);
+
+// Acknowledge chunk received (Python side)
+VS_API int32_t VS_AckPs2PyChunk(VS_Channel ch);
+
+// Check if transfer is complete
+VS_API int32_t VS_IsPs2PyComplete(VS_Channel ch);
+
+// =============================================================================
+// ZERO-COPY RECEIVE (PowerShell side reads Python chunks)
+// =============================================================================
+
+// Wait for next chunk from Python
+VS_API int32_t VS_WaitPy2PsChunk(
+    VS_Channel ch,
+    uint32_t* out_chunk_index,
+    uint64_t* out_offset,
+    uint64_t* out_length,
+    uint32_t timeout_ms
+);
+
+// Acknowledge chunk received (PowerShell side)
+VS_API int32_t VS_AckPy2PsChunk(VS_Channel ch);
+
+// Check if transfer is complete
+VS_API int32_t VS_IsPy2PsComplete(VS_Channel ch);
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
+// Get shared memory base pointer (for calculating absolute addresses)
+VS_API void* VS_GetMemoryBase(VS_Channel ch);
+
+// Get header info
 VS_API int32_t VS_GetHeader(VS_Channel ch, VS_Header* out);
 
-// Signal helpers for PY→PS writers (optional for your PY side, exposed for symmetry)
-VS_API int32_t VS_WritePy2Ps(VS_Channel ch,
-                             const uint8_t* data,
-                             uint64_t len,
-                             uint32_t timeout_ms,
-                             uint64_t* next_seq);
+// =============================================================================
+// OBJECT SERIALIZATION (PowerShell → Bytes via C++/CLI)
+// =============================================================================
 
-VS_API int32_t VS_ReadPs2Py(VS_Channel ch,
-                            uint8_t* dst,
-                            uint64_t dst_cap,
-                            uint64_t* out_len,
-                            uint32_t timeout_ms);
+// Serialize PowerShell object to bytes via GCHandle
+// gc_handle: GCHandle.ToIntPtr() from PowerShell
+// Returns allocated byte array (caller must free with VS_FreeBytes)
+VS_API int32_t VS_SerializeObject(
+    intptr_t gc_handle,
+    uint8_t** out_bytes,
+    uint64_t* out_length
+);
+
+// Free bytes allocated by VS_SerializeObject
+VS_API void VS_FreeBytes(uint8_t* bytes);
+
+// Combined: Serialize object and send via chunked transfer
+// This is the most efficient path for PowerShell objects
+VS_API int32_t VS_SendObjectPs2Py(
+    VS_Channel ch,
+    intptr_t gc_handle,
+    uint64_t chunk_size,
+    uint32_t timeout_ms
+);

@@ -70,16 +70,6 @@ if TYPE_CHECKING:
         isComplete: bool
         allResults: List[ExecutionResult]
 
-    class SharedMemoryChannel(Protocol):
-        def __init__(self, name: str, frame_bytes: int) -> None: ...
-        def write_to_powershell(self, data: bytes) -> None: ...
-        def read_from_powershell(self, seq: int) -> bytes: ...
-        def read_into_powershell(self, seq: int, buffer: bytearray) -> None: ...
-        def get_powershell_seq(self) -> int: ...
-        def get_python_seq(self) -> int: ...
-        def get_powershell_length(self) -> int: ...
-        def get_python_length(self) -> int: ...
-        
         @property
         def header_bytes(self) -> int: ...
 
@@ -162,13 +152,6 @@ def _raise_on_failure(
     if raise_on_error:
         msg = err if err else f"{label} failed with exit_code={res.exit_code}"
         raise ExecutionError(msg)
-
-def create_shared_memory_channel(name: str, n_slots: int, frame_bytes: int) -> SharedMemoryChannel:
-    """Create a shared memory channel backed by a single shared frame."""
-    if n_slots != 1:
-        raise ValueError("SharedMemoryChannel v2 only supports n_slots=1")
-    mod = _CPP_MODULE
-    return mod.SharedMemoryChannel(name, frame_bytes)
 
 # ---------- Public API ----------
 class Shell:
