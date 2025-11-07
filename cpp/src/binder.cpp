@@ -6,7 +6,6 @@
 #include "../include/virtual_shell.hpp"
 #include "../include/py_bridge.hpp"
 #include "../include/py_proxy.hpp"
-#include "../include/mem/shared_memory.hpp"
 
 namespace py = pybind11;
 
@@ -269,27 +268,6 @@ PYBIND11_MODULE(_core, m) {
         .def("__repr__", [](const virtualshell::pybridge::PsProxy& proxy) {
             return std::string("<PsProxy type='") + proxy.type_name() + "'>";
         });
-
-    py::class_<SharedMemoryChannel>(m, "SharedMemoryChannel")
-        .def(py::init<const std::string&, size_t, size_t>(),
-             py::arg("name"),
-             py::arg("n_slots"),
-             py::arg("frame_bytes"))
-        .def(py::init<const std::string&, size_t>(),
-             py::arg("name"),
-             py::arg("frame_bytes"))
-        .def("write_to_powershell", &SharedMemoryChannel::WriteToPowerShell, py::arg("data"))
-        .def("read_from_powershell", &SharedMemoryChannel::ReadFromPowerShell, py::arg("seq"))
-        .def("read_into_powershell", &SharedMemoryChannel::ReadIntoPowerShell, py::arg("seq"), py::arg("buffer"))
-        .def("get_powershell_seq", &SharedMemoryChannel::GetPowerShellSeq)
-        .def("get_python_seq", &SharedMemoryChannel::GetPythonSeq)
-        .def("get_powershell_length", &SharedMemoryChannel::GetPowerShellLength)
-        .def("get_python_length", &SharedMemoryChannel::GetPythonLength)
-        .def_property_readonly_static("header_bytes", [](py::object) {
-            return SharedMemoryChannel::HeaderBytes();
-        })
-        .def_property_readonly("frame_bytes", &SharedMemoryChannel::frame_bytes);
-
 
     // Utility
     m.def("create_config", []() { return VirtualShell::Config{}; }, "Create a new Config object with default values");

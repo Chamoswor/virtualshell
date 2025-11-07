@@ -2,6 +2,9 @@
 
 Complete redesign of the shared memory API with focus on simplicity, performance, and zero-copy transfers.
 
+> **Platform note**
+> The native zero-copy bridge currently ships with a Windows-only `win_pwsh.dll`. Python code imports cleanly on macOS/Linux, but trying to instantiate `ZeroCopyBridge` or run the performance harness will raise a friendly `RuntimeError` until non-Windows backends are implemented.
+
 ## Design Principles
 
 1. **Python owns channel lifecycle** - PowerShell never closes channels

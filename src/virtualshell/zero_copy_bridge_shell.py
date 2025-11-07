@@ -18,12 +18,17 @@ if TYPE_CHECKING:
 
 __all__ = ["ZeroCopyBridge", "find_dll"]
 
+_IS_WINDOWS = os.name == "nt"
+
 # =============================================================================
 # DLL LOADING
 # =============================================================================
 
 def find_dll() -> Path:
     """Find win_pwsh.dll."""
+    if not _IS_WINDOWS:
+        raise RuntimeError("win_pwsh.dll is only available on Windows platforms")
+
     if env_path := os.environ.get("VIRTUALSHELL_WIN_PWSH_DLL"):
         dll_path = Path(env_path)
         if dll_path.is_file():
@@ -47,9 +52,20 @@ def find_dll() -> Path:
     
     raise FileNotFoundError("win_pwsh.dll not found. Set VIRTUALSHELL_WIN_PWSH_DLL environment variable.")
 
-# Load DLL
-_dll_path = find_dll()
-_dll = ctypes.CDLL(str(_dll_path))
+
+def _load_win_dll() -> tuple[Optional[Path], Optional[ctypes.CDLL]]:
+    """Attempt to load the Windows DLL, returning path and handle when available."""
+    if not _IS_WINDOWS:
+        return None, None
+
+    dll_path = find_dll()
+    try:
+        return dll_path, ctypes.CDLL(str(dll_path))
+    except OSError as exc:
+        raise RuntimeError(f"Failed to load win_pwsh.dll from {dll_path}: {exc}") from exc
+
+# Load DLL (Windows only)
+_dll_path, _dll = _load_win_dll()
 
 # Status codes
 VS_OK = 0
@@ -61,44 +77,45 @@ VS_ERR_BAD_STATE = -3
 VS_ERR_TOO_LARGE = -4
 
 # Function signatures
-_dll.VS_CreateChannel.argtypes = [ctypes.c_wchar_p, ctypes.c_uint64]
-_dll.VS_CreateChannel.restype = ctypes.c_void_p
+if _dll is not None:
+    _dll.VS_CreateChannel.argtypes = [ctypes.c_wchar_p, ctypes.c_uint64]
+    _dll.VS_CreateChannel.restype = ctypes.c_void_p
 
-_dll.VS_DestroyChannel.argtypes = [ctypes.c_void_p]
-_dll.VS_DestroyChannel.restype = None
+    _dll.VS_DestroyChannel.argtypes = [ctypes.c_void_p]
+    _dll.VS_DestroyChannel.restype = None
 
-_dll.VS_BeginPy2PsTransfer.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64]
-_dll.VS_BeginPy2PsTransfer.restype = ctypes.c_int32
+    _dll.VS_BeginPy2PsTransfer.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64]
+    _dll.VS_BeginPy2PsTransfer.restype = ctypes.c_int32
 
-_dll.VS_SendPy2PsChunk.argtypes = [
-    ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_ubyte),
-    ctypes.c_uint64, ctypes.c_uint32
-]
-_dll.VS_SendPy2PsChunk.restype = ctypes.c_int32
+    _dll.VS_SendPy2PsChunk.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_ubyte),
+        ctypes.c_uint64, ctypes.c_uint32
+    ]
+    _dll.VS_SendPy2PsChunk.restype = ctypes.c_int32
 
-_dll.VS_WaitPy2PsAck.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-_dll.VS_WaitPy2PsAck.restype = ctypes.c_int32
+    _dll.VS_WaitPy2PsAck.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    _dll.VS_WaitPy2PsAck.restype = ctypes.c_int32
 
-_dll.VS_FinishPy2PsTransfer.argtypes = [ctypes.c_void_p]
-_dll.VS_FinishPy2PsTransfer.restype = ctypes.c_int32
+    _dll.VS_FinishPy2PsTransfer.argtypes = [ctypes.c_void_p]
+    _dll.VS_FinishPy2PsTransfer.restype = ctypes.c_int32
 
-_dll.VS_WaitPs2PyChunk.argtypes = [
-    ctypes.c_void_p,
-    ctypes.POINTER(ctypes.c_uint32),
-    ctypes.POINTER(ctypes.c_uint64),
-    ctypes.POINTER(ctypes.c_uint64),
-    ctypes.c_uint32
-]
-_dll.VS_WaitPs2PyChunk.restype = ctypes.c_int32
+    _dll.VS_WaitPs2PyChunk.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_uint32
+    ]
+    _dll.VS_WaitPs2PyChunk.restype = ctypes.c_int32
 
-_dll.VS_AckPs2PyChunk.argtypes = [ctypes.c_void_p]
-_dll.VS_AckPs2PyChunk.restype = ctypes.c_int32
+    _dll.VS_AckPs2PyChunk.argtypes = [ctypes.c_void_p]
+    _dll.VS_AckPs2PyChunk.restype = ctypes.c_int32
 
-_dll.VS_IsPs2PyComplete.argtypes = [ctypes.c_void_p]
-_dll.VS_IsPs2PyComplete.restype = ctypes.c_int32
+    _dll.VS_IsPs2PyComplete.argtypes = [ctypes.c_void_p]
+    _dll.VS_IsPs2PyComplete.restype = ctypes.c_int32
 
-_dll.VS_GetMemoryBase.argtypes = [ctypes.c_void_p]
-_dll.VS_GetMemoryBase.restype = ctypes.c_void_p
+    _dll.VS_GetMemoryBase.argtypes = [ctypes.c_void_p]
+    _dll.VS_GetMemoryBase.restype = ctypes.c_void_p
 
 # =============================================================================
 # INTEGRATED BRIDGE WITH SHELL
@@ -140,6 +157,10 @@ class ZeroCopyBridge:
             chunk_mb: Default chunk size in MB
             scope: "Local" or "Global"
         """
+        dll = _dll
+        if dll is None:
+            raise RuntimeError("ZeroCopyBridge requires win_pwsh.dll and is only available on Windows")
+
         self.shell = shell
         self.channel_name = f"{scope}\\{channel_name}"
         self.channel_name_short = channel_name  # Without prefix
@@ -148,16 +169,17 @@ class ZeroCopyBridge:
         self.default_chunk_bytes = chunk_mb * 1024 * 1024
         self._active_jobs = []  # Track active PowerShell jobs
         self._active_futures: List[Future[Any]] = []
+        self._dll = dll
         
         # Create channel (Python owns it)
-        self._handle = _dll.VS_CreateChannel(self.channel_name, self.frame_bytes)
+        self._handle = dll.VS_CreateChannel(self.channel_name, self.frame_bytes)
         if not self._handle:
             raise RuntimeError(f"Failed to create channel: {self.channel_name}")
         
         # Get shared memory base
-        self._mem_base = _dll.VS_GetMemoryBase(self._handle)
+        self._mem_base = dll.VS_GetMemoryBase(self._handle)
         if not self._mem_base:
-            _dll.VS_DestroyChannel(self._handle)
+            dll.VS_DestroyChannel(self._handle)
             raise RuntimeError("Failed to get shared memory base")
         
         self._mem_base_addr = self._mem_base if isinstance(self._mem_base, int) else self._mem_base.value
@@ -165,6 +187,8 @@ class ZeroCopyBridge:
         # Load PowerShell bridge module
         bridge_script = Path(__file__).parent / "zero_copy_bridge.ps1"
         dll_path = _dll_path
+        if dll_path is None:
+            raise RuntimeError("win_pwsh.dll path is unavailable")
         
         # Store paths for job execution
         self._ps_script_path = str(bridge_script.absolute())
@@ -187,8 +211,11 @@ class ZeroCopyBridge:
                 future.cancel()
             self._active_futures.clear()
 
-        if hasattr(self, '_handle') and self._handle:
-            _dll.VS_DestroyChannel(self._handle)
+        if hasattr(self, '_handle') and self._handle and hasattr(self, "_dll"):
+            try:
+                self._dll.VS_DestroyChannel(self._handle)
+            except Exception:
+                pass
     
     def __enter__(self):
         return self
@@ -207,7 +234,7 @@ class ZeroCopyBridge:
         self._active_futures.clear()
         
         if self._handle:
-            _dll.VS_DestroyChannel(self._handle)
+            self._dll.VS_DestroyChannel(self._handle)
             self._handle = None
 
     def _track_future(self, future: Future[Any]) -> Future[Any]:
@@ -279,6 +306,7 @@ class ZeroCopyBridge:
         Returns:
             bytes or memoryview of received data
         """
+        dll = self._dll
         timeout_ms = int(timeout * 1000)
         chunks = []
         
@@ -287,7 +315,7 @@ class ZeroCopyBridge:
             chunk_offset = ctypes.c_uint64()
             chunk_length = ctypes.c_uint64()
             
-            result = _dll.VS_WaitPs2PyChunk(
+            result = dll.VS_WaitPs2PyChunk(
                 self._handle,
                 ctypes.byref(chunk_index),
                 ctypes.byref(chunk_offset),
@@ -297,7 +325,7 @@ class ZeroCopyBridge:
             
             if result == VS_TIMEOUT:
                 # PowerShell might have finished immediately after the last ACK
-                if _dll.VS_IsPs2PyComplete(self._handle):
+                if dll.VS_IsPs2PyComplete(self._handle):
                     break
                 raise TimeoutError("Timeout waiting for PowerShell chunk")
             elif result != VS_OK:
@@ -311,16 +339,16 @@ class ZeroCopyBridge:
             chunks.append(bytes(chunk_mv))
             
             # Acknowledge chunk
-            result = _dll.VS_AckPs2PyChunk(self._handle)
+            result = dll.VS_AckPs2PyChunk(self._handle)
             if result != VS_OK:
                 raise RuntimeError(f"VS_AckPs2PyChunk failed: {result}")
             
             # Check if complete
-            is_complete = _dll.VS_IsPs2PyComplete(self._handle)
+            is_complete = dll.VS_IsPs2PyComplete(self._handle)
             if not is_complete:
                 poll_deadline = time.perf_counter() + min(0.2, timeout)
                 while time.perf_counter() < poll_deadline:
-                    if _dll.VS_IsPs2PyComplete(self._handle):
+                    if dll.VS_IsPs2PyComplete(self._handle):
                         is_complete = 1
                         break
                     time.sleep(0.001)
@@ -359,7 +387,8 @@ class ZeroCopyBridge:
         timeout_ms = int(timeout * 1000)
         
         # Begin transfer
-        result = _dll.VS_BeginPy2PsTransfer(self._handle, len(data), chunk_bytes)
+        dll = self._dll
+        result = dll.VS_BeginPy2PsTransfer(self._handle, len(data), chunk_bytes)
         if result != VS_OK:
             raise RuntimeError(f"VS_BeginPy2PsTransfer failed: {result}")
         
@@ -373,20 +402,20 @@ class ZeroCopyBridge:
             
             c_array = (ctypes.c_ubyte * len(chunk_data)).from_buffer_copy(chunk_data)
             
-            result = _dll.VS_SendPy2PsChunk(
+            result = dll.VS_SendPy2PsChunk(
                 self._handle, i, c_array, chunk_len, timeout_ms
             )
             if result != VS_OK:
                 raise RuntimeError(f"VS_SendPy2PsChunk failed at chunk {i}: {result}")
             
-            result = _dll.VS_WaitPy2PsAck(self._handle, timeout_ms)
+            result = dll.VS_WaitPy2PsAck(self._handle, timeout_ms)
             if result == VS_TIMEOUT:
                 raise TimeoutError(f"Timeout waiting for PowerShell ACK at chunk {i}")
             elif result != VS_OK:
                 raise RuntimeError(f"VS_WaitPy2PsAck failed at chunk {i}: {result}")
         
         # Mark complete
-        result = _dll.VS_FinishPy2PsTransfer(self._handle)
+        result = dll.VS_FinishPy2PsTransfer(self._handle)
         if result != VS_OK:
             raise RuntimeError(f"VS_FinishPy2PsTransfer failed: {result}")
     

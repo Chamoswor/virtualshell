@@ -18,6 +18,10 @@ from virtualshell import Shell
 from virtualshell.zero_copy_bridge_shell import ZeroCopyBridge
 
 
+if os.name != "nt":
+    raise SystemExit("Zero-copy bridge performance tests currently require Windows.")
+
+
 # Start with smaller sizes since transfer is slow (~2 MB/s)
 DEFAULT_TEST_SIZES_MB: list[int] = [10, 50, 100]
 ENV_SIZE_OVERRIDE = "VIRTUALSHELL_PERF_SIZES"
