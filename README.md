@@ -83,9 +83,70 @@ Every API surface (sync/async/script) accepts `timeout` overrides and optional e
 
 ---
 
+## Zero-Copy Bridge (Windows only)
+
+For high-throughput data transfer between Python and PowerShell, the Zero-Copy Bridge uses shared memory to eliminate serialization overhead. Ideal for large binary data, files, or high-frequency transfers.
+
+```python
+from virtualshell import Shell, ZeroCopyBridge, PSObject
+
+with Shell(timeout_seconds=60) as shell:
+    with ZeroCopyBridge(shell) as bridge:
+        # Python → PowerShell
+        data = b"Large binary data" * 100000
+        bridge.send(data, "$myData", timeout=30.0)
+        res = shell.run("$myData.Length")
+        print(f"PowerShell received {res.out.strip()} bytes")
+    
+        # PowerShell → Python
+        shell.run("$response = [byte[]]::new(1048576)")
+        data = bridge.receive("$response", timeout=30.0)
+        print(f"Python received {len(data)} bytes")
+```
+
+For more complex scenarios involving PowerShell objects, you can serialize/deserialize them using the built-in methods:
+
+```python
+with Shell(timeout_seconds=60) as shell:
+    # Get processes from PowerShell
+    shell.run("$processes = Get-Process | Select-Object -First 5 -Property Name, Id, WorkingSet64")
+
+    with ZeroCopyBridge(shell) as bridge:
+        # Send the process list to Python
+        bridge.serialize("processes", out_var="bytes")
+        ps_bytes_raw: bytes = bridge.receive("bytes")
+
+        # Convert bytes to PSObject in Python
+        ps_obj = PSObject.from_bytes(ps_bytes_raw)
+
+        # Print each process info
+        for process in ps_obj["Items"]:
+            print(f"Process Name: {process['Name']}, ID: {process['Id']}, Memory: {process['WorkingSet64']} bytes")
+
+        # Modify the process names in Python
+        for process in ps_obj["Items"]:
+            process["Name"] = f"Modified_{process['Name']}"
+        
+        # Send modified object back to PowerShell
+        bridge.send(ps_obj.to_bytes(), "processes")
+        bridge.deserialize("processes")
+        
+        # Verify changes in PowerShell
+        res = shell.run("$processes | Where-Object { $_.Name -like 'Modified_*' }")
+        print("\nModified Processes in PowerShell:")
+        print(res.out)
+
+```
+
+**Performance:** 5-150 MB/s depending on data size. Requires `win_pwsh.dll` (Windows only).
+
+See [Zero-Copy Bridge guide](wiki/Usage/Zero-Copy%20Bridge.md) for complete documentation.
+
+---
+
 ## PowerShell object proxies
 
-`Shell.generate_psobject` reflects a PowerShell object into a Python `Protocol`, while `Shell.make_proxy` creates a live proxy that forwards attribute access back into PowerShell. Together they give you IDE-friendly, type-hinted automation.
+`Shell.generate_psobject` reflects a PowerShell object into a Python `Protocol`, while `Shell.make_proxy` creates a live proxy that forwards attribute access back into PowerShell. Together they give you IDE-friendly, type-hinted automation. This is still an experimental feature and may not cover all edge cases.
 
 ```python
 from virtualshell import Shell
@@ -108,38 +169,6 @@ with Shell(strip_results=True, timeout_seconds=60) as sh:
 ```
 
 Detailed guides live in the wiki: [generate_psobject](wiki/Usage/generate_psobject.md) and [make_proxy](wiki/Usage/make_proxy.md).
-
----
-
-## Zero-Copy Bridge (Windows only)
-
-For high-throughput data transfer between Python and PowerShell, the Zero-Copy Bridge uses shared memory to eliminate serialization overhead. Ideal for large binary data, files, or high-frequency transfers.
-
-```python
-from virtualshell import Shell
-from virtualshell.zero_copy_bridge_shell import ZeroCopyBridge
-
-with Shell(timeout_seconds=60) as shell:
-    bridge = ZeroCopyBridge(shell, channel_name="data_channel")
-    
-    # Python → PowerShell
-    data = b"Large binary data" * 100000
-    future = bridge.receive_to_powershell("$myData", timeout=30.0)
-    bridge.send(data, timeout=30.0)
-    future.result()
-    
-    # PowerShell → Python
-    shell.run("$response = [byte[]]::new(1048576)")  # 1 MB
-    future = bridge.send_from_powershell("$response", timeout=30.0)
-    received = bridge.receive(timeout=30.0)
-    future.result()
-    
-    bridge.close()
-```
-
-**Performance:** 5-150 MB/s depending on data size. Requires `win_pwsh.dll` (Windows only).
-
-See [Zero-Copy Bridge guide](wiki/Usage/Zero-Copy%20Bridge.md) for complete documentation.
 
 ---
 

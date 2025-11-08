@@ -79,7 +79,6 @@ if TYPE_CHECKING:
 else:
     ExecutionResult = _CPP_MODULE.ExecutionResult
     BatchProgress = _CPP_MODULE.BatchProgress
-    SharedMemoryChannel = _CPP_MODULE.SharedMemoryChannel
 
 # ---------- Utils ----------
 def quote_pwsh_literal(s: str) -> str:

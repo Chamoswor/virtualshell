@@ -13,12 +13,14 @@ This approach has significant overhead for large data. The Zero-Copy Bridge elim
 - Using **shared memory** for direct data access
 - **Chunked transfers** for large data
 - **Zero-copy reads** via memoryview in Python
-- **C++/CLI serialization** for PowerShell objects
+- **Automatic CliXml serialization** for PowerShell objects
+- **PSObject deserialization** in Python with full type preservation
 
 ## When to Use
 
 ✅ **Good use cases:**
-- Transferring large binary data (images, files, arrays)
+- Transferring PowerShell objects to Python (Get-Process, Get-Service, etc.)
+- Large binary data (images, files, arrays)
 - High-frequency data exchange
 - Performance-critical applications
 - Large JSON/XML datasets
@@ -34,21 +36,48 @@ This approach has significant overhead for large data. The Zero-Copy Bridge elim
 ### Setup
 
 ```python
-from virtualshell import Shell
-from virtualshell.zero_copy_bridge_shell import ZeroCopyBridge
+from virtualshell import Shell, ZeroCopyBridge, PSObject
 
-# Create a shell instance
-shell = Shell(timeout_seconds=60)
-shell.start()
+# Create shell and bridge (automatically generates unique channel name)
+with Shell(timeout_seconds=60) as shell:
+    with ZeroCopyBridge(shell, frame_mb=64, chunk_mb=4) as bridge:
+        # Use bridge here
+        pass
+```
 
-# Create bridge (automatically loads PowerShell module and DLL)
-bridge = ZeroCopyBridge(
-    shell,
-    channel_name="my_data_channel",  # Unique name for this channel
-    frame_mb=64,                     # Memory per direction (default: 64 MB)
-    chunk_mb=4,                      # Chunk size (default: 4 MB)
-    scope="Local"                    # "Local" or "Global"
-)
+### PowerShell → Python (Recommended Pattern)
+
+Send PowerShell objects to Python with automatic deserialization:
+
+```python
+from virtualshell import Shell, ZeroCopyBridge, PSObject
+
+with Shell() as shell:
+    # Create PowerShell object
+    shell.run("""
+    $myObject = [PSCustomObject]@{
+        Name = 'TestServer'
+        Status = 'Running'
+        Memory = 1024MB
+        CreatedAt = Get-Date
+    }
+    """)
+    
+    with ZeroCopyBridge(shell) as bridge:
+        # Serialize PowerShell object to bytes
+        bridge.serialize("myObject", out_var="bytes")
+        
+        # Send from PowerShell to Python (all-in-one)
+        data = bridge.receive("bytes")
+        
+        # Parse to Python object
+        obj = PSObject.from_bytes(data)
+        
+        # Access properties with full type preservation
+        print(f"Name: {obj['Name']}")           # String
+        print(f"Status: {obj['Status']}")       # String
+        print(f"Memory: {obj['Memory']}")       # int (bytes)
+        print(f"Created: {obj['CreatedAt']}")   # datetime object
 ```
 
 ### Python → PowerShell
@@ -59,270 +88,507 @@ Send bytes from Python to PowerShell:
 # Prepare data in Python
 data = b"Hello from Python" * 1000
 
-# Start PowerShell receive (async)
-future = bridge.receive_to_powershell("$myData", timeout=30.0)
-
-# Send data
-bridge.send(data, timeout=30.0)
-
-# Wait for PowerShell to finish receiving
-result = future.result(timeout=30.0)
-print(f"PowerShell received: {result.success}")
-
-# Now $myData is available in PowerShell
-output = shell.run("$myData.Length")
-print(f"Bytes in PowerShell: {output.out}")
+with ZeroCopyBridge(shell) as bridge:
+    # Send to PowerShell (all-in-one)
+    bridge.send(data, "myData")
+    
+    # Now $myData is available in PowerShell
+    result = shell.run("$myData.Length")
+    print(f"Bytes in PowerShell: {result.out}")
 ```
 
-### PowerShell → Python
+## PSObject - PowerShell Object Serialization & Deserialization
 
-Send data from PowerShell to Python:
+The `PSObject` class provides bidirectional conversion between PowerShell CliXml format and Python objects with full type preservation.
+
+### Supported Types
+
+| PowerShell Type | Python Type | Example |
+|----------------|-------------|---------|
+| `[string]` | `str` | `"Hello"` |
+| `[int]`, `[long]` | `int` | `42` |
+| `[double]`, `[float]` | `float` | `3.14` |
+| `[bool]` | `bool` | `True` |
+| `[datetime]` | `datetime` | `datetime(2025, 11, 8, tzinfo=...)` |
+| `[hashtable]` | `dict` | `{'key': 'value'}` |
+| `[array]` | `list` | `[1, 2, 3]` |
+| `[PSCustomObject]` | `PSObject` | Nested object |
+| `[guid]` | `str` | `"123e4567-e89b..."` |
+| `[version]` | `str` | `"1.0.0"` |
+| `$null` | `None` | `None` |
+
+### Accessing Properties
 
 ```python
-# Create data in PowerShell
-shell.run("$testData = [byte[]]::new(1048576)")  # 1 MB
+# Get property with type information
+prop = obj.get_property("Name")
+print(f"Name: {prop.value} (type: {prop.type})")
 
-# Start PowerShell send (async)
-future = bridge.send_from_powershell("$testData", timeout=30.0)
+# Shorthand access (recommended)
+name = obj["Name"]
+status = obj["Status"]
 
-# Receive in Python (zero-copy with memoryview)
-data = bridge.receive(timeout=30.0, return_memoryview=True)
-print(f"Received {len(data)} bytes")
+# Check object type
+print(f"PowerShell type: {obj.type_name}")
+```
 
-# Wait for PowerShell to complete
-result = future.result(timeout=30.0)
+### Serializing Python Objects to PowerShell
 
-# Convert memoryview to bytes if needed
-data_bytes = bytes(data)
+You can serialize a `PSObject` back to CliXml bytes and send it to PowerShell:
+
+```python
+# Parse PowerShell object
+obj = PSObject.from_bytes(data)
+
+# Modify properties in Python
+obj.properties["Name"].value = "UpdatedName"
+obj.properties["Status"].value = "Modified"
+
+# Serialize back to CliXml bytes
+clixml_bytes = obj.to_bytes()
+
+# Send to PowerShell
+with ZeroCopyBridge(shell) as bridge:
+    bridge.send(clixml_bytes, "modifiedObject")
+    
+    # Deserialize in PowerShell (bytes → object)
+    bridge.deserialize("modifiedObject")
+    
+    # Now $modifiedObject is a full PowerShell object
+    result = shell.run("$modifiedObject.Name")
+    print(result.out)  # "UpdatedName"
+```
+
+### Real-World Examples
+
+#### Windows Services
+
+```python
+with Shell() as shell:
+    shell.run("""
+    $services = Get-Service | Select-Object -First 5 | ForEach-Object {
+        [PSCustomObject]@{
+            Name = $_.Name
+            DisplayName = $_.DisplayName
+            Status = $_.Status.ToString()
+            StartType = $_.StartType.ToString()
+        }
+    }
+    """)
+    
+    with ZeroCopyBridge(shell) as bridge:
+        bridge.serialize("services", out_var="bytes")
+        data = bridge.receive("bytes")
+
+        services_obj = PSObject.from_bytes(data) # Parse to Python
+        services = services_obj["Items"][0] # First service object
+
+        print(f"Service: {services['Name']}")
+        print(f"Display: {services['DisplayName']}")
+        print(f"Status: {services['Status']}")
+```
+
+#### System Information
+
+```python
+with Shell() as shell:
+    shell.run("""
+    $os = Get-CimInstance Win32_OperatingSystem
+    $systemInfo = [PSCustomObject]@{
+        OSName = $os.Caption
+        Version = $os.Version
+        BootTime = $os.LastBootUpTime
+        TotalRAM = [long]$os.TotalVisibleMemorySize * 1KB
+        Processes = (Get-Process).Count
+    }
+    """)
+    
+    with ZeroCopyBridge(shell) as bridge:
+        bridge.serialize("systemInfo", out_var="bytes")
+        data = bridge.receive("bytes")
+        info = PSObject.from_bytes(data)
+        
+        # Access with full type preservation
+        print(f"OS: {info['OSName']}")
+        print(f"Version: {info['Version']}")
+        print(f"Boot Time: {info['BootTime']}")  # datetime object!
+        print(f"RAM: {info['TotalRAM'] / (1024**3):.2f} GB")
+        print(f"Processes: {info['Processes']}")
+```
+
+## API Reference
+
+### ZeroCopyBridge
+
+```python
+bridge = ZeroCopyBridge(
+    shell,              # Shell instance
+    frame_mb=64,        # Memory size per direction (MB)
+    chunk_mb=4,         # Chunk size for transfers (MB)
+    scope="Local"       # "Local" or "Global" scope
+)
+```
+
+### Methods
+
+#### `serialize(variable, *, depth=1, out_var=None, timeout=30.0)`
+
+Serialize PowerShell object to CliXml bytes in-place.
+
+```python
+# Serialize $myObject to $bytes
+bridge.serialize("myObject", out_var="bytes")
+
+# With depth control for nested objects
+bridge.serialize("complexObject", out_var="bytes", depth=3)
+```
+
+**Parameters:**
+- `variable`: PowerShell variable name (with or without `$`)
+- `depth`: Serialization depth (default: 1)
+- `out_var`: Output variable name (default: overwrites input variable)
+- `timeout`: Timeout in seconds
+
+**Returns:** `bool` - True if successful
+
+#### `deserialize(variable, *, out_var=None, timeout=30.0)`
+
+Deserialize CliXml bytes in PowerShell variable back to PowerShell object.
+
+```python
+# Restore PowerShell object from bytes
+bridge.deserialize("myBytes")
+
+# Or store in different variable
+bridge.deserialize("myBytes", out_var="restoredObject")
+```
+
+**Parameters:**
+- `variable`: PowerShell variable name containing CliXml bytes
+- `out_var`: Output variable name (default: overwrites input variable)
+- `timeout`: Timeout in seconds
+
+**Returns:** `bool` - True if successful
+
+#### `receive(variable, *, timeout=30.0, return_memoryview=False)`
+
+Receive variable from PowerShell to Python (all-in-one operation).
+
+```python
+# Receive as bytes (default)
+data = bridge.receive("myData")
+
+# Receive as memoryview (zero-copy)
+data_view = bridge.receive("myData", return_memoryview=True)
+```
+
+**Parameters:**
+- `variable`: PowerShell variable name
+- `timeout`: Timeout in seconds
+- `return_memoryview`: If True, return memoryview (zero-copy)
+
+**Returns:** `bytes` or `memoryview`
+
+#### `send(data, variable, *, chunk_size=None, timeout=30.0)`
+
+Send bytes from Python to PowerShell (all-in-one operation).
+
+```python
+# Send data to PowerShell variable
+bridge.send(b"Hello PowerShell", "myData")
+
+# Now $myData is available in PowerShell
+```
+
+**Parameters:**
+- `data`: Bytes to send
+- `variable`: PowerShell variable name to create
+- `chunk_size`: Chunk size in bytes (default: from `chunk_mb`)
+- `timeout`: Timeout in seconds
+
+### PSObject
+
+```python
+# Parse CliXml bytes to Python object
+obj = PSObject.from_bytes(data)
+
+# Access properties
+name = obj["PropertyName"]          # Shorthand
+prop = obj.get_property("PropertyName")  # Full property info
+
+# Inspect object
+print(obj.type_name)                # PowerShell type name
+print(obj.properties)               # Dict of all properties
+
+# Serialize back to CliXml bytes
+clixml_bytes = obj.to_bytes()
+
+# Send to PowerShell and deserialize
+bridge.send(clixml_bytes, "restoredBytes")
+bridge.deserialize("restoredBytes")  # Now it's a PowerShell object again
 ```
 
 ## Advanced Patterns
 
-### Context Manager
+### Python ↔ PowerShell Object Round-Trip
 
-Use context managers for automatic cleanup:
+Complete example showing how to modify PowerShell objects in Python and send them back:
 
 ```python
-with Shell(timeout_seconds=60) as shell:
-    with ZeroCopyBridge(shell, channel_name="temp_channel") as bridge:
-        # Transfer data
-        future = bridge.receive_to_powershell("$data", timeout=10.0)
-        bridge.send(b"test data", timeout=10.0)
-        future.result()
+from virtualshell import Shell, ZeroCopyBridge, PSObject
+
+with Shell() as shell:
+    # Create PowerShell object
+    shell.run("""
+    $user = [PSCustomObject]@{
+        Name = 'John Doe'
+        Age = 30
+        Active = $true
+        Roles = @('Admin', 'User')
+    }
+    """)
+    
+    with ZeroCopyBridge(shell) as bridge:
+        # Send from PowerShell to Python
+        bridge.serialize("user", out_var="userBytes")
+        data = bridge.receive("userBytes")
         
-        # Channel automatically cleaned up when exiting context
+        # Parse and modify in Python
+        user = PSObject.from_bytes(data)
+        user.properties["Name"].value = "Jane Smith"
+        user.properties["Age"].value = 35
+        user.properties["Roles"].value.append("Manager")
+        
+        # Serialize and send back to PowerShell
+        modified_bytes = user.to_bytes()
+        bridge.send(modified_bytes, "modifiedUserBytes")
+        
+        # Deserialize in PowerShell
+        bridge.deserialize("modifiedUserBytes", out_var="modifiedUser")
+        
+        # Verify in PowerShell
+        result = shell.run("""
+        Write-Output "Name: $($modifiedUser.Name)"
+        Write-Output "Age: $($modifiedUser.Age)"
+        Write-Output "Roles: $($modifiedUser.Roles -join ', ')"
+        """)
+        print(result.out)
+```
+
+### Complete Workflow Example
+
+```python
+from virtualshell import Shell, ZeroCopyBridge, PSObject
+from datetime import datetime
+
+with Shell(timeout_seconds=60) as shell:
+    # Gather data in PowerShell
+    shell.run("""
+    $data = Get-Process | Select-Object -First 10 | ForEach-Object {
+        [PSCustomObject]@{
+            Name = $_.Name
+            PID = $_.Id
+            Memory = $_.WorkingSet64
+            StartTime = $_.StartTime
+        }
+    }
+    """)
+    
+    with ZeroCopyBridge(shell, frame_mb=64, chunk_mb=4) as bridge:
+        # Serialize to CliXml bytes
+        bridge.serialize("data", out_var="bytes")
+        
+        # Transfer to Python
+        data = bridge.receive("bytes")
+        
+        # Parse to Python object
+        processes_obj = PSObject.from_bytes(data)
+        processes = processes_obj["Items"]
+
+        # Print process information
+        for proc in processes:
+            if isinstance(proc, PSObject):
+                print(f"Process: {proc['Name']}")
+                print(f"  PID: {proc['PID']}")
+                mem_mb = int(proc['Memory']) / 1024 / 1024
+                print(f"  Memory: {mem_mb:.1f} MB")
+                start_time = proc['StartTime']
+                if isinstance(start_time, datetime):
+                    print(f"  Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                else:
+                    print(f"  Started: N/A (system process)")
+            print()
 ```
 
 ### Large File Transfer
 
-Transfer files efficiently:
-
 ```python
+from virtualshell import Shell, ZeroCopyBridge
 from pathlib import Path
 
-# Read file
-file_path = Path("large_file.bin")
-file_data = file_path.read_bytes()
+#  Create a large binary file in Python
+data = b'0123456789ABCDEF' * 65536 * 32  # ~32 MB
+Path("large_file.bin").write_bytes(data)
 
-# Send to PowerShell
-future = bridge.receive_to_powershell("$fileData", timeout=120.0)
-bridge.send(file_data, timeout=120.0)
-future.result()
 
-# Save in PowerShell
-shell.run("[IO.File]::WriteAllBytes('C:\\output.bin', $fileData)")
+with Shell(timeout_seconds=120, set_UTF8=True, strip_results=True) as shell:
+# Read file in Python
+    file_data = Path("large_file.bin").read_bytes()
+
+    with ZeroCopyBridge(shell) as bridge:
+        # Send to PowerShell
+        bridge.send(file_data, "fileData")
+        
+        # Save in PowerShell
+        shell.run("[IO.File]::WriteAllBytes('output.bin', $fileData)")
 ```
 
-### PowerShell Objects
-
-Send PowerShell objects (automatically serialized):
+### Transferring Modified PowerShell Objects
 
 ```python
-# Create complex PowerShell object
-shell.run("""
-$myObject = [PSCustomObject]@{
-    Name = 'Test'
-    Values = 1..1000
-    Data = @{Key='Value'}
-}
-""")
+from virtualshell import Shell, ZeroCopyBridge, PSObject
 
-# Send to Python
-future = bridge.send_from_powershell("$myObject", timeout=30.0)
-serialized_data = bridge.receive(timeout=30.0)
-result = future.result()
+with Shell(timeout_seconds=60, set_UTF8=True, strip_results=True) as shell:
+    # Get processes from PowerShell - explicitly select properties we want
+    shell.run("""
+    $procs = Get-Process | Select-Object -First 5 -Property Name, Id, WorkingSet64
+    """)
 
-# Data is CliXml serialized bytes
-print(f"Received {len(serialized_data)} bytes of serialized object")
+    with ZeroCopyBridge(shell) as bridge:
+        # Transfer to Python
+        bridge.serialize("procs", out_var="procBytes")
+        data = bridge.receive("procBytes")
+        procs = PSObject.from_bytes(data)
 
-# Deserialize in PowerShell if needed
-future = bridge.receive_to_powershell("$deserializedData", timeout=30.0)
-bridge.send(serialized_data, timeout=30.0)
-future.result()
+        for proc in procs["Items"]:
+            memory_mb = proc["WorkingSet64"] / (1024 * 1024)
+            
+            proc.properties["MemoryMB"] = PSObject.Property(
+                name="MemoryMB",
+                type=float,
+                value=round(memory_mb, 2)
+            )
+        
+        # Send modified object back to PowerShell
+        modified_bytes = procs.to_bytes()
+        bridge.send(modified_bytes, "modifiedProcs")
+        bridge.deserialize("modifiedProcs")
+        
+        # Use in PowerShell
+        result = shell.run("$modifiedProcs | Format-Table Name, MemoryMB")
+        print(result.out)
 ```
 
-### Batch Processing
-
-Process multiple items efficiently:
+### Nested Objects with Depth Control
 
 ```python
-# Process multiple datasets
-datasets = [b"data1" * 1000, b"data2" * 1000, b"data3" * 1000]
+from virtualshell import Shell, ZeroCopyBridge, PSObject
 
-for i, data in enumerate(datasets):
-    # Send each dataset
-    future = bridge.receive_to_powershell(f"$dataset{i}", timeout=10.0)
-    bridge.send(data, timeout=10.0)
-    future.result()
+with Shell(timeout_seconds=60, set_UTF8=True, strip_results=True) as shell:
+    # Get processes from PowerShell - explicitly select properties we want
+    shell.run("""
+    $complex = [PSCustomObject]@{
+        Level1 = [PSCustomObject]@{
+            Level2 = [PSCustomObject]@{
+                Level3 = 'Deep value'
+            }
+        }
+    }
+    """)
 
-# Process in PowerShell
-result = shell.run("""
-$results = @()
-for ($i = 0; $i -lt 3; $i++) {
-    $varName = "dataset$i"
-    $data = Get-Variable -Name $varName -ValueOnly
-    $results += $data.Length
-}
-$results -join ','
-""")
-print(f"Processed sizes: {result.out}")
+    with ZeroCopyBridge(shell) as bridge:
+        # Serialize with depth 3 to capture all levels
+        bridge.serialize("complex", out_var="bytes", depth=3)
+        data = bridge.receive("bytes")
+        obj = PSObject.from_bytes(data)
+        print(obj)
+        # Access nested properties
+        level1 = obj["Level1"]
+        if isinstance(level1, PSObject):
+            level2 = level1["Level2"]
+            if isinstance(level2, PSObject):
+                value = level2["Level3"]
+                print(f"Value: {value}")
 ```
 
 ## Performance Tips
 
 ### 1. Use Memoryview for Zero-Copy
 
-Always use `return_memoryview=True` when you don't need to modify the data:
-
 ```python
-# Zero-copy (fastest)
-data = bridge.receive(return_memoryview=True)
-size = len(data)  # No copy!
+# Zero-copy (fastest) - no data duplication
+data = bridge.receive("myData", return_memoryview=True)
+size = len(data)
 
 # Creates copy (slower for large data)
-data = bridge.receive(return_memoryview=False)
+data = bridge.receive("myData", return_memoryview=False)
 ```
 
 ### 2. Adjust Chunk Size
 
-Match chunk size to your data patterns:
-
 ```python
-# Small chunks (1-4 MB) - better for streaming
+# Small chunks (1-4 MB) - better for many small transfers
 bridge = ZeroCopyBridge(shell, chunk_mb=2)
 
-# Large chunks (16-64 MB) - better raw throughput
+# Large chunks (16-64 MB) - better for large single transfers
 bridge = ZeroCopyBridge(shell, chunk_mb=32)
 ```
 
-### 3. Reuse Channels
-
-Create one bridge and reuse it:
+### 3. Control Serialization Depth
 
 ```python
-# Good - reuse bridge
-bridge = ZeroCopyBridge(shell, channel_name="main")
-for i in range(100):
-    bridge.send(data)
-    # ... receive ...
+# Shallow (depth=1) - faster, less data
+bridge.serialize("obj", depth=1)  # Default
 
-# Avoid - creating new bridges repeatedly
-for i in range(100):
-    bridge = ZeroCopyBridge(shell, channel_name=f"temp_{i}")  # Slow!
-    bridge.send(data)
+# Deep (depth=3+) - slower, captures all nested objects
+bridge.serialize("complexObj", depth=3)
 ```
 
-### 4. Use Appropriate Timeouts
-
-Set realistic timeouts based on data size:
+### 4. Reuse Bridge Instances
 
 ```python
-# Small data (< 1 MB)
-bridge.send(small_data, timeout=5.0)
+# Good - create once, use many times
+with ZeroCopyBridge(shell) as bridge:
+    for item in items:
+        bridge.send(item, "data")
+        result = shell.run("Process-Data $data")
 
-# Large data (> 100 MB)
-bridge.send(large_data, timeout=120.0)
-```
-
-### 5. Prefer byte[] in PowerShell
-
-For maximum performance, use byte arrays:
-
-```python
-# Fast - byte array
-shell.run("$data = [byte[]]::new(1000000)")
-bridge.send_from_powershell("$data")
-
-# Slower - objects require serialization
-shell.run("$data = 1..1000000")
-bridge.send_from_powershell("$data")
-```
-
-## Common Patterns
-
-### Binary File I/O
-
-```python
-# Python -> PowerShell -> File
-with open("input.bin", "rb") as f:
-    data = f.read()
-
-future = bridge.receive_to_powershell("$fileData")
-bridge.send(data)
-future.result()
-
-shell.run("[IO.File]::WriteAllBytes('output.bin', $fileData)")
-
-# File -> PowerShell -> Python
-shell.run("$fileData = [IO.File]::ReadAllBytes('input.bin')")
-future = bridge.send_from_powershell("$fileData")
-data = bridge.receive()
-future.result()
-
-with open("output.bin", "wb") as f:
-    f.write(data)
-```
-
-### Data Processing Pipeline
-
-```python
-import numpy as np
-
-# Generate data in Python
-array = np.random.bytes(10_000_000)
-
-# Send to PowerShell for processing
-future = bridge.receive_to_powershell("$rawData")
-bridge.send(array)
-future.result()
-
-# Process in PowerShell
-shell.run("""
-$processedData = [byte[]]::new($rawData.Length)
-for ($i = 0; $i -lt $rawData.Length; $i++) {
-    $processedData[$i] = $rawData[$i] -bxor 0xFF
-}
-""")
-
-# Get result back
-future = bridge.send_from_powershell("$processedData")
-result = bridge.receive()
-future.result()
+# Avoid - creating new bridges is expensive
+for item in items:
+    with ZeroCopyBridge(shell) as bridge:  # Slow!
+        bridge.send(item, "data")
 ```
 
 ## Error Handling
 
-Always handle potential errors:
-
 ```python
 try:
-    future = bridge.receive_to_powershell("$data", timeout=30.0)
-    bridge.send(large_data, timeout=30.0)
-    result = future.result(timeout=30.0)
-    
-    if not result.success:
-        print(f"PowerShell error: {result.err}")
+    with ZeroCopyBridge(shell) as bridge:
+        # Serialize - may fail for non-serializable types
+        if not bridge.serialize("myObj", out_var="bytes"):
+            print("Failed to serialize object")
+            exit(1)
         
+        # Transfer - may timeout or fail
+        data = bridge.receive("bytes", timeout=30.0)
+        
+        # Parse - may fail for invalid CliXml
+        obj = PSObject.from_bytes(data)
+        
+        # Modify and serialize back
+        obj.properties["Status"].value = "Updated"
+        modified_bytes = obj.to_bytes()
+        
+        # Send back to PowerShell
+        bridge.send(modified_bytes, "modifiedBytes")
+        
+        # Deserialize in PowerShell
+        if not bridge.deserialize("modifiedBytes"):
+            print("Failed to deserialize in PowerShell")
+            exit(1)
+        
+except ValueError as e:
+    print(f"Serialization or parsing error: {e}")
 except TimeoutError:
     print("Transfer timed out - increase timeout or reduce data size")
 except RuntimeError as e:
@@ -336,31 +602,43 @@ except Exception as e:
 - **Windows only** - Requires `win_pwsh.dll`
 - **Same machine** - Cannot transfer between remote machines
 - **Memory constraints** - Frame size limits maximum transfer size
-- **Type preservation** - Complex PowerShell objects serialize to CliXml (not native Python types)
+- **Serialization limits** - Some PowerShell types cannot be serialized (COM objects, FileStreams, PSCredentials, etc.)
 - **Execution policy** - Automatically set to Bypass (may conflict with strict policies)
 
 ## Troubleshooting
 
-### "Failed to create channel"
+### Serialization Fails
 
 ```python
-# Ensure channel name is unique
-bridge = ZeroCopyBridge(shell, channel_name=f"channel_{os.getpid()}")
+# Check if object can be serialized
+if not bridge.serialize("myObj", out_var="bytes"):
+    print("Object cannot be serialized - check type")
+    # Try simpler object or Select-Object specific properties
 ```
 
-### "Timeout waiting for PowerShell chunk"
+### Timeout Errors
 
 ```python
-# Increase timeout
-data = bridge.receive(timeout=120.0)  # 2 minutes
+# Increase timeout for large data
+data = bridge.receive("largeData", timeout=120.0)  # 2 minutes
 
-# Or reduce data size/increase chunk size
-bridge = ZeroCopyBridge(shell, chunk_mb=16)
+# Or increase chunk size
+bridge = ZeroCopyBridge(shell, chunk_mb=32)
 ```
 
 ### "Data exceeds frame size"
 
 ```python
-# Increase frame size
+# Increase frame size for very large transfers
 bridge = ZeroCopyBridge(shell, frame_mb=256)  # 256 MB per direction
+```
+
+### DateTime Parsing Issues
+
+```python
+# DateTime is automatically parsed to Python datetime with timezone
+dt = obj["Timestamp"]
+if isinstance(dt, datetime):
+    print(f"Time: {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Timezone: {dt.tzinfo}")
 ```

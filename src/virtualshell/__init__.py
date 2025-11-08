@@ -4,12 +4,12 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .shell import ExecutionResult, BatchProgress, Shell, ExitCode
-    from .zero_copy_bridge_shell import ZeroCopyBridge
+    from .zero_copy_bridge_shell import ZeroCopyBridge, PSObject
 
 try:
     from ._version import version as __version__
 except Exception:
-    __version__ = "1.1.3"
+    __version__ = "0.0.0"
 
 
 from .errors import (
@@ -23,7 +23,7 @@ __all__ = [
     "VirtualShellError", "PowerShellNotFoundError",
     "ExecutionTimeoutError", "ExecutionError",
     "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode",
-    "ZeroCopyBridge",
+    "ZeroCopyBridge", "PSObject",
 ]
 
 def __getattr__(name: str):
@@ -32,8 +32,8 @@ def __getattr__(name: str):
         obj = getattr(mod, name)
         globals()[name] = obj
         return obj
-    if name in {"ZeroCopyBridge"}:
-        mod = import_module(".zero_copy_bridge", __name__)
+    if name in {"ZeroCopyBridge", "PSObject"}:
+        mod = import_module(".zero_copy_bridge_shell", __name__)
         obj = getattr(mod, name)
         globals()[name] = obj
         return obj
