@@ -64,15 +64,15 @@ function Initialize-VSNative {
     
     $script:VSNativeDllPath = $loadedPath
     
-    # Define P/Invoke signatures
+    # Define P/Invoke signatures with full DLL path
     if (-not ('VS.Native.V2' -as [type])) {
-        Add-Type -TypeDefinition @"
+        $typeDefinition = @"
 using System;
 using System.Runtime.InteropServices;
 
 namespace VS.Native {
     public static class V2 {
-        private const string DllName = "win_pwsh.dll";
+        private const string DllName = @"$loadedPath";
         
         // Channel lifecycle
         [DllImport(DllName, CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
@@ -120,6 +120,7 @@ namespace VS.Native {
     }
 }
 "@
+        Add-Type -TypeDefinition $typeDefinition
     }
     
     $script:VSNativeInitialized = $true

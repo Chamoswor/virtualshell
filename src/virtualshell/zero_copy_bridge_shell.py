@@ -194,8 +194,11 @@ class ZeroCopyBridge:
         self._ps_script_path = str(bridge_script.absolute())
         self._ps_dll_path = str(dll_path.absolute())
         
+        # Load PowerShell bridge script (set execution policy bypass for this session)
+        self.shell.run("Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force")
         self.shell.run(f". '{bridge_script}'")
-        self.shell.run("Initialize-VSNative")
+        init_cmd = f"Initialize-VSNative -PreferredPath '{self._ps_dll_path}'"
+        self.shell.run(init_cmd)
     
     def __del__(self):
         # Clean up any active jobs
@@ -258,7 +261,6 @@ class ZeroCopyBridge:
         variable: str,
         *,
         timeout: float = 30.0,
-        use_job: bool = True
     ):
         """Trigger PowerShell to send variable to Python.
         
@@ -272,24 +274,13 @@ class ZeroCopyBridge:
         Returns:
               Job ID (int) if use_job=True, else concurrent.futures.Future
         """
-        if use_job:
-            # Start one-shot job
-            cmd = f"""
-                $job = Start-SendVariableToPythonJob -ChannelName '{self.channel_name_short}' -Variable {variable} -ChunkSizeMB {self.default_chunk_bytes // (1024*1024)} -TimeoutSeconds {int(timeout)} -Scope '{self._scope}' -ScriptPath '{self._ps_script_path}' -DllPath '{self._ps_dll_path}'
-                $job.Id
-            """
-            result = self.shell.run(cmd)
-            job_id = int(result.out.strip())
-            self._active_jobs.append(job_id)
-            return job_id
-        else:
-            # Use run_async to avoid per-transfer ThreadJob overhead
-            cmd = f"""
-                Send-VariableToPython -ChannelName '{self.channel_name_short}' -Variable {variable} -ChunkSizeMB {self.default_chunk_bytes // (1024*1024)} -TimeoutSeconds {int(timeout)} -Scope '{self._scope}'
-            """
-            command = cmd.strip()
-            future = self.shell.run_async(command, timeout=timeout)
-            return self._track_future(future)
+        # Use run_async to avoid per-transfer ThreadJob overhead
+        cmd = f"""
+            Send-VariableToPython -ChannelName '{self.channel_name_short}' -Variable {variable} -ChunkSizeMB {self.default_chunk_bytes // (1024*1024)} -TimeoutSeconds {int(timeout)} -Scope '{self._scope}'
+        """
+        command = cmd.strip()
+        future = self.shell.run_async(command, timeout=timeout)
+        return self._track_future(future)
     
     def receive(
         self,
@@ -424,40 +415,25 @@ class ZeroCopyBridge:
         variable: str,
         *,
         timeout: float = 30.0,
-        use_job: bool = True
     ):
         """Trigger PowerShell to receive data into variable.
-        
-        Uses one-shot PowerShell Job that loads module and receives.
         
         Args:
             variable: PowerShell variable name (e.g., "$mydata")
             timeout: Timeout in seconds
-            use_job: If True, use PowerShell Job (recommended)
         
         Returns:
-            Job ID (int) if use_job=True, else ExecutionResult
+            Future representing the receive operation
         """
         var_name = variable.lstrip('$')
         
-        if use_job:
-            # Start one-shot job
-            cmd = f"""
-                $job = Start-ReceiveVariableFromPythonJob -ChannelName '{self.channel_name_short}' -VariableName '{var_name}' -TimeoutSeconds {int(timeout)} -Scope '{self._scope}' -ScriptPath '{self._ps_script_path}' -DllPath '{self._ps_dll_path}'
-                $job.Id
-            """
-            result = self.shell.run(cmd)
-            job_id = int(result.out.strip())
-            self._active_jobs.append(job_id)
-            return job_id
-        else:
-            # Use run_async completion future instead of spawning jobs
-            cmd = f"""
-                Receive-VariableFromPython -ChannelName '{self.channel_name_short}' -VariableName '{var_name}' -TimeoutSeconds {int(timeout)} -Scope '{self._scope}'
-            """
-            command = cmd.strip()
-            future = self.shell.run_async(command, timeout=timeout)
-            return self._track_future(future)
+        # Use run_async completion future instead of spawning jobs
+        cmd = f"""
+            Receive-VariableFromPython -ChannelName '{self.channel_name_short}' -VariableName '{var_name}' -TimeoutSeconds {int(timeout)} -Scope '{self._scope}'
+        """
+        command = cmd.strip()
+        future = self.shell.run_async(command, timeout=timeout)
+        return self._track_future(future)
     
     @property
     def handle(self) -> Any:
