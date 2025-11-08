@@ -111,6 +111,38 @@ Detailed guides live in the wiki: [generate_psobject](wiki/Usage/generate_psobje
 
 ---
 
+## Zero-Copy Bridge (Windows only)
+
+For high-throughput data transfer between Python and PowerShell, the Zero-Copy Bridge uses shared memory to eliminate serialization overhead. Ideal for large binary data, files, or high-frequency transfers.
+
+```python
+from virtualshell import Shell
+from virtualshell.zero_copy_bridge_shell import ZeroCopyBridge
+
+with Shell(timeout_seconds=60) as shell:
+    bridge = ZeroCopyBridge(shell, channel_name="data_channel")
+    
+    # Python → PowerShell
+    data = b"Large binary data" * 100000
+    future = bridge.receive_to_powershell("$myData", timeout=30.0)
+    bridge.send(data, timeout=30.0)
+    future.result()
+    
+    # PowerShell → Python
+    shell.run("$response = [byte[]]::new(1048576)")  # 1 MB
+    future = bridge.send_from_powershell("$response", timeout=30.0)
+    received = bridge.receive(timeout=30.0)
+    future.result()
+    
+    bridge.close()
+```
+
+**Performance:** 5-150 MB/s depending on data size. Requires `win_pwsh.dll` (Windows only).
+
+See [Zero-Copy Bridge guide](wiki/Usage/Zero-Copy%20Bridge.md) for complete documentation.
+
+---
+
 ## Core API overview
 
 | Method | Purpose |
