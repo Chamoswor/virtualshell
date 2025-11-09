@@ -11,13 +11,16 @@ import os
 import time
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any, List, Optional, TYPE_CHECKING, Type
+from typing import Any, List, Optional, TYPE_CHECKING, Type, Dict
+from datetime import datetime
+import base64
+import json
 from dataclasses import dataclass
 
 if TYPE_CHECKING:
     from .shell import Shell
 
-__all__ = ["ZeroCopyBridge", "find_dll"]
+__all__ = ["ZeroCopyBridge", "find_dll", "PSObject"]
 
 _IS_WINDOWS = os.name == "nt"
 
@@ -567,6 +570,73 @@ class PSObject:
         # Unknown type - return as string
         else:
             return text, str
+        
+    def to_dict(
+        self,
+        *,
+        mode: str = "flat",
+        include_none: bool = True,
+        bytes_as: str = "base64",  # "base64" | "list"
+        include_type: bool = False # adds __type per nested PSObject when mode="flat"
+    ) -> Dict[str, Any]:
+        """
+        Convert PSObject to a JSON-friendly dict.
+
+        modes:
+          - "flat":   {"Name": "...", "Id": 1, ...}
+          - "typed":  {"__type": "X.Y.Z", "props": { ... }}
+
+        bytes_as:
+          - "base64" (default): "AAEC..." string
+          - "list":   [0,1,2,...]  (slightly larger JSON)
+        """
+        def jsonify_scalar(val: Any) -> Any:
+            if isinstance(val, PSObject):
+                return val.to_dict(
+                    mode=mode, include_none=include_none,
+                    bytes_as=bytes_as, include_type=include_type
+                )
+            if isinstance(val, datetime):
+                return val.isoformat()
+            if isinstance(val, bytes):
+                if bytes_as == "list":
+                    return list(val)
+                return base64.b64encode(val).decode("ascii")
+            if isinstance(val, (list, tuple, set)):
+                return [jsonify_scalar(v) for v in val]
+            if isinstance(val, dict):
+                return {str(k): jsonify_scalar(v) for k, v in val.items()}
+            # JSON doesn't support NaN/Inf well; convert to string if needed
+            if isinstance(val, float) and (val != val or val in (float("inf"), float("-inf"))):
+                return str(val)
+            # basic JSON types pass through
+            return val
+
+        # Special-case array-like PSObject parsed as {"Items": [...]}
+        is_array_like = ("[]" in getattr(self, "type_name", "")) or ("Array" in getattr(self, "type_name", ""))
+        if is_array_like and "Items" in self.properties:
+            arr = jsonify_scalar(self.properties["Items"].value)
+            if mode == "typed":
+                return {"__type": self.type_name, "items": arr}
+            else:
+                # flat mode returns bare list to embed nicely in JSON
+                return arr
+
+        # Regular object: build props dict
+        props: Dict[str, Any] = {}
+        for name, prop in self.properties.items():
+            val = jsonify_scalar(prop.value)
+            if val is None and not include_none:
+                continue
+            props[name] = val
+
+        if mode == "typed":
+            return {"__type": self.type_name, "props": props}
+        else:
+            if include_type:
+                # helpful when you still want a flat dict but keep type info
+                props["__type"] = self.type_name
+            return props
 
 # =============================================================================
 # INTEGRATED BRIDGE WITH SHELL
