@@ -85,7 +85,7 @@ Every API surface (sync/async/script) accepts `timeout` overrides and optional e
 
 ## Zero-Copy Bridge (Windows only) ⚠️
 
-*Windows-only feature requiring `win_pwsh.dll`*
+*Windows-only feature requiring `win_pwsh.dll`, in the future I plan to support other platforms*
 
 For high-throughput data transfer between Python and PowerShell, the Zero-Copy Bridge uses shared memory to eliminate serialization overhead. Ideal for large binary data, files, or high-frequency transfers.
 
