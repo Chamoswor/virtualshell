@@ -8,12 +8,12 @@
 
 ## Why virtualshell?
 
-- **Persistent session** – reuse modules, `$env:*`, and functions between calls.
-- **Low latency** – avoid the 200+ ms penalty of `subprocess.run("pwsh")`; most commands settle in ~2-4 ms.
-- **Async + batching** – schedule commands concurrently or in batches with strong timeout control.
-- **Structured results** – every invocation returns stdout/stderr, exit code, success flag, and timing.
-- **Predictable failures** – typed Python exceptions for “pwsh missing”, timeouts, and execution errors.
-- **Type-safe automation** – generate Python `Protocol`s from PowerShell objects and create live proxies with full type hints.
+- 🔄 **Persistent session** – reuse modules, `$env:*`, and functions between calls.
+- ⚡ **Low latency** – avoid the 200+ ms penalty of `subprocess.run("pwsh")`; most commands settle in ~2-4 ms.
+- 🔀 **Async + batching** – schedule commands concurrently or in batches with strong timeout control.
+- 📊 **Structured results** – every invocation returns stdout/stderr, exit code, success flag, and timing.
+- 🚨 **Predictable failures** – typed Python exceptions for “pwsh missing”, timeouts, and execution errors.
+- 🛠️ **Type-safe automation** – generate Python `Protocol`s from PowerShell objects and create live proxies with full type hints.
 
 Typical users embed PowerShell inside Python orchestration, long-running agents, or test suites that need reliability and speed.
 ---
@@ -255,6 +255,14 @@ python -m pip install dist/virtualshell-*.whl
 - [Benchmarks](wiki/Project/Benchmarks.md)
 
 Bug reports and feature requests are welcome via issues or discussions.
+
+---
+
+## Getting Help
+
+- 📚 [Full documentation](https://github.com/Chamoswor/virtualshell/wiki)
+- 🐛 [Report issues](https://github.com/Chamoswor/virtualshell/issues)
+- 💬 [Discussions](https://github.com/Chamoswor/virtualshell/discussions)
 
 ---
 
