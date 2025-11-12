@@ -1,6 +1,6 @@
 # virtualshell
 
-High-performance PowerShell automation for Python. `virtualshell` keeps a single PowerShell host warm and exposes it through a thin Python wrapper backed by a C++ engine. The result: millisecond-scale latency, async execution, and session persistence without juggling subprocesses.
+**High-performance PowerShell automation for Python.** Keep a single PowerShell host warm through a thin Python wrapper backed by a C++ engine. The result: millisecond-scale latency, async execution, and session persistence without juggling subprocesses.
 
 > Full documentation now lives in the [project wiki](https://github.com/Chamoswor/virtualshell/wiki). This README gives you the essentials and quick links.
 
@@ -83,7 +83,9 @@ Every API surface (sync/async/script) accepts `timeout` overrides and optional e
 
 ---
 
-## Zero-Copy Bridge (Windows only)
+## Zero-Copy Bridge (Windows only) ⚠️
+
+*Windows-only feature requiring `win_pwsh.dll`*
 
 For high-throughput data transfer between Python and PowerShell, the Zero-Copy Bridge uses shared memory to eliminate serialization overhead. Ideal for large binary data, files, or high-frequency transfers.
 
@@ -113,8 +115,8 @@ with Shell(timeout_seconds=60) as shell:
 
     with ZeroCopyBridge(shell) as bridge:
         # Send the process list to Python
-        bridge.serialize("processes", out_var="bytes")
-        ps_bytes_raw: bytes = bridge.receive("bytes")
+        bridge.serialize("$processes", out_var="$bytes")
+        ps_bytes_raw: bytes = bridge.receive("$bytes")
 
         # Convert bytes to PSObject in Python
         ps_obj = PSObject.from_bytes(ps_bytes_raw)
@@ -128,8 +130,8 @@ with Shell(timeout_seconds=60) as shell:
             process["Name"] = f"Modified_{process['Name']}"
         
         # Send modified object back to PowerShell
-        bridge.send(ps_obj.to_bytes(), "processes")
-        bridge.deserialize("processes")
+        bridge.send(ps_obj.to_bytes(), "$processes")
+        bridge.deserialize("$processes")
         
         # Verify changes in PowerShell
         res = shell.run("$processes | Where-Object { $_.Name -like 'Modified_*' }")
@@ -146,7 +148,7 @@ See [Zero-Copy Bridge guide](wiki/Usage/Zero-Copy%20Bridge.md) for complete docu
 
 ## PowerShell object proxies
 
-`Shell.generate_psobject` reflects a PowerShell object into a Python `Protocol`, while `Shell.make_proxy` creates a live proxy that forwards attribute access back into PowerShell. Together they give you IDE-friendly, type-hinted automation. This is still an experimental feature and may not cover all edge cases.
+`Shell.generate_psobject` reflects a PowerShell object into a Python `Protocol`, while `Shell.make_proxy` creates a live proxy that forwards attribute access back into PowerShell. Together they give you IDE-friendly, type-hinted automation.
 
 ```python
 from virtualshell import Shell

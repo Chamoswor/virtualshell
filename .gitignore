@@ -10,3 +10,4 @@ dist/
 test_run*
 test_performance_bridge.py
 ZEROCOPY_BRIDGE.md
+.vs/
