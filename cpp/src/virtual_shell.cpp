@@ -869,24 +869,14 @@ std::string VirtualShell::build_pwsh_packet(uint64_t id, std::string_view cmd) {
     const std::string beg = "<<<SS_BEG_" + std::to_string(id) + ">>>";
     const std::string end = "<<<SS_END_" + std::to_string(id) + ">>>";
 
-    auto ps_quote_single = [](std::string_view s) {
-        std::string t; t.reserve(s.size()+2);
-        t.push_back('\'');
-        for (char c : s) t += (c=='\'' ? "''" : std::string(1, c));
-        t.push_back('\'');
-        return t;
-    };
-
     std::string full;
     full.reserve(cmd.size() + beg.size() + end.size() + 96);
 
-    full += "[Console]::Out.WriteLine(" + ps_quote_single(beg) + ")\n"; // Begin marker
-
+    full += "[Console]::Out.WriteLine(" + virtualshell::helpers::parsers::ps_quote(beg) + ")\n"; // Begin marker
     full.append(cmd);
     if (full.empty() || full.back() != '\n') full.push_back('\n'); // Ensure trailing newline
 
-    full += "[Console]::Out.WriteLine(" + ps_quote_single(end) + ")\n"; // End marker
-
+    full += "[Console]::Out.WriteLine(" + virtualshell::helpers::parsers::ps_quote(end) + ")\n"; // End marker
     return full;
 }
 

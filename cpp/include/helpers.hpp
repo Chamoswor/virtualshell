@@ -59,15 +59,43 @@ static inline void trim_inplace(std::string& s) {
 /**
  * @brief Quote a string as a PowerShell single-quoted literal.
  */
-static inline std::string ps_quote(const std::string& s) {
-
-    std::string t;
+static inline std::string ps_quote(std::string_view s) {
+    std::string t; 
     t.reserve(s.size() + 2);
     t.push_back('\'');
-    for (char c : s) {
-        if (c == '\'') t += "''"; 
-        else t.push_back(c);
+    
+    for (size_t i = 0; i < s.size(); ) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        
+        // Handle ASCII single quote
+        if (c == '\'') {
+            t += "''";
+            ++i;
+        }
+        else if (c == 0xE2 && i + 2 < s.size()) {
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            
+            // https://www.compart.com/en/unicode/U+2018 | U+2019 | U+201A | U+201B
+            // U+2018 (') = E2 80 98
+            // U+2019 (') = E2 80 99
+            // U+201A (‚) = E2 80 9A
+            // U+201B (‛) = E2 80 9B
+            if (c1 == 0x80 && (c2 >= 0x98 && c2 <= 0x9B)) {
+                t += s.substr(i, 3);
+                t += s.substr(i, 3);
+                i += 3;
+            } else {
+                t += c;
+                ++i;
+            }
+        }
+        else {
+            t += c;
+            ++i;
+        }
     }
+    
     t.push_back('\'');
     return t;
 }
