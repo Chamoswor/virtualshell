@@ -1,46 +1,132 @@
-# virtualshell
+# 🐚 virtualshell
+[![PyPI version](https://img.shields.io/pypi/v/virtualshell.svg)](https://pypi.org/project/virtualshell/)
+[![Python versions](https://img.shields.io/pypi/pyversions/virtualshell.svg)](https://pypi.org/project/virtualshell/)
+[![OS](https://img.shields.io/badge/OS-Windows%20%7C%20Linux%20%7C%20macOS-blue)](#)
+[![License](https://img.shields.io/github/license/Chamoswor/virtualshell.svg)](LICENSE)
+[![Build](https://img.shields.io/github/actions/workflow/status/Chamoswor/virtualshell/workflow.yml)](https://github.com/Chamoswor/virtualshell/actions)
 
-**High-performance PowerShell automation for Python.** Keep a single PowerShell host warm through a thin Python wrapper backed by a C++ engine. The result: millisecond-scale latency, async execution, and session persistence without juggling subprocesses.
 
-> Full documentation now lives in the [project wiki](https://github.com/Chamoswor/virtualshell/wiki). This README gives you the essentials and quick links.
+**High-performance PowerShell automation for Python**
+Run PowerShell commands with *millisecond latency*, persistent sessions, async execution, and a zero-copy bridge — without juggling subprocesses.
+
+> 🔗 **Full documentation lives in the [wiki](https://github.com/Chamoswor/virtualshell/wiki)**
+> This README focuses on *what it is*, *why it matters*, and *how to get started fast*.
 
 ---
 
-## Why virtualshell?
+## ✨ What is virtualshell?
 
-- 🔄 **Persistent session** – reuse modules, `$env:*`, and functions between calls.
-- ⚡ **Low latency** – avoid the 200+ ms penalty of `subprocess.run("pwsh")`; most commands settle in ~2-4 ms.
-- 🔀 **Async + batching** – schedule commands concurrently or in batches with strong timeout control.
-- 📊 **Structured results** – every invocation returns stdout/stderr, exit code, success flag, and timing.
-- 🚨 **Predictable failures** – typed Python exceptions for “pwsh missing”, timeouts, and execution errors.
-- 🛠️ **Type-safe automation** – generate Python `Protocol`s from PowerShell objects and create live proxies with full type hints.
+`virtualshell` keeps **one PowerShell host warm** behind a thin Python wrapper powered by a **C++ engine**.
 
-Typical users embed PowerShell inside Python orchestration, long-running agents, or test suites that need reliability and speed.
+Instead of spawning `pwsh` for every command, you get:
+
+* a **persistent PowerShell session**
+* **~2–4 ms execution latency**
+* **async + batch execution**
+* **structured, predictable results**
+* optional **zero-copy shared memory** (Windows)
+
+Perfect for:
+
+* Python orchestration layers
+* long-running agents
+* CI/test harnesses
+* automation tooling that must be *fast and reliable*
+
 ---
 
-## Installation
+## 🚀 Why use it?
+
+* 🔄 **Persistent session**
+  Reuse loaded modules, `$env:*`, functions, and global state.
+
+* ⚡ **Ultra-low latency**
+  Avoid the ~200 ms cost of `subprocess.run("pwsh")`.
+
+* 🔀 **Async & batching**
+  Schedule concurrent commands with timeouts and callbacks.
+
+* 📊 **Structured results**
+  Every call returns stdout, stderr, exit code, timing, and success state.
+
+* 🚨 **Predictable failures**
+  Typed Python exceptions for timeouts, missing PowerShell, execution errors.
+
+* 🛠️ **Type-safe automation**
+  Generate Python `Protocol`s from PowerShell objects and control them via live proxies.
+
+---
+
+## 📦 Installation
+
+Pre-built wheels are published for:
+
+* **Windows**
+* **Linux** (x86_64 / aarch64)
+* **macOS** (universal2)
+
+### PowerShell requirement
+
+PowerShell (`pwsh` or `powershell.exe`) must be available on `PATH`,
+unless you pass an explicit path in the configuration.
+
+---
+
+### ✅ Recommended: install pre-built wheels
 
 ```bash
 pip install virtualshell
 ```
 
-Pre-built wheels are published for Windows, Linux (x86_64/aarch64), and macOS universal2. PowerShell (`pwsh` or `powershell.exe`) must be discoverable on `PATH` unless you pass an explicit path.
+No compiler or build tools required.
 
 ---
 
-## Quick start
+### 🔧 Build from source (optional)
+
+Use this only if you explicitly want to build locally.
+
+#### Windows (⚠️ 64-bit only)
+
+1. Install **Visual Studio Build Tools**
+
+   * Workload: *Desktop development with C++*
+2. Open **x64 Native Tools Command Prompt for VS**
+
+```bash
+pip install virtualshell --no-binary virtualshell
+```
+
+Or directly from GitHub:
+
+```bash
+pip install "git+https://github.com/Chamoswor/virtualshell"
+```
+
+---
+
+### 🔍 Verify installation
+
+```bash
+python -c "import virtualshell; print('virtualshell OK')"
+```
+
+---
+
+## ⚡ Quick start
 
 ```python
 from virtualshell import Shell
 
 with Shell(timeout_seconds=5) as sh:
-    result = sh.run("Write-Output 'Hello from pwsh'")
-    print(result.out.strip())
+    print(sh.run("Write-Output 'Hello from pwsh'").out.strip())
 
     sh.run("function Inc { $global:i++; $global:i }")
     print(sh.run("Inc").out.strip())  # 1
     print(sh.run("Inc").out.strip())  # 2
 ```
+
+---
 
 ### Async execution
 
@@ -58,8 +144,9 @@ async def main():
 asyncio.run(main())
 ```
 
+---
 
-### Scripts and arguments
+### Running scripts with arguments
 
 ```python
 from pathlib import Path
@@ -67,202 +154,114 @@ from virtualshell import Shell
 
 shell = Shell().start()
 
-# Positional arguments
-shell.script(Path("./scripts/test.ps1"), args=["alpha", "42"])
-
-# Named arguments (hashtable splatting)
-shell.script(
-    Path("./scripts/test.ps1"),
-    args={"Name": "Alice", "Count": "3"},
-)
+shell.script(Path("test.ps1"), args=["alpha", "42"])
+shell.script(Path("test.ps1"), args={"Name": "Alice", "Count": "3"})
 
 shell.stop()
 ```
 
-Every API surface (sync/async/script) accepts `timeout` overrides and optional error raising via `raise_on_error` or callbacks.
+All execution APIs support:
+
+* per-call timeouts
+* `raise_on_error`
+* callbacks
 
 ---
 
-## Zero-Copy Bridge (Windows only) ⚠️
+## 🧠 Advanced features
 
-*Windows-only feature requiring `win_pwsh.dll`, in the future I plan to support other platforms*
+### 🔌 Zero-Copy Bridge (Windows only)
 
-For high-throughput data transfer between Python and PowerShell, the Zero-Copy Bridge uses shared memory to eliminate serialization overhead. Ideal for large binary data, files, or high-frequency transfers.
+> High-throughput shared-memory transfer between Python and PowerShell
+> Requires `win_pwsh.dll`
+
+Ideal for large binary blobs, files, or high-frequency data exchange.
 
 ```python
-from virtualshell import Shell, ZeroCopyBridge, PSObject
+from virtualshell import Shell, ZeroCopyBridge
 
 with Shell(timeout_seconds=60) as shell:
     with ZeroCopyBridge(shell) as bridge:
-        # Python → PowerShell
-        data = b"Large binary data" * 100000
-        bridge.send(data, "$myData", timeout=30.0)
-        res = shell.run("$myData.Length")
-        print(f"PowerShell received {res.out.strip()} bytes")
-    
-        # PowerShell → Python
-        shell.run("$response = [byte[]]::new(1048576)")
-        data = bridge.receive("$response", timeout=30.0)
-        print(f"Python received {len(data)} bytes")
+        data = b"x" * 1_000_000
+        bridge.send(data, "$buf")
+        print(shell.run("$buf.Length").out)
 ```
 
-For more complex scenarios involving PowerShell objects, you can serialize/deserialize them using the built-in methods:
-
-```python
-with Shell(timeout_seconds=60) as shell:
-    # Get processes from PowerShell
-    shell.run("$processes = Get-Process | Select-Object -First 5 -Property Name, Id, WorkingSet64")
-
-    with ZeroCopyBridge(shell) as bridge:
-        # Send the process list to Python
-        bridge.serialize("$processes", out_var="$bytes")
-        ps_bytes_raw: bytes = bridge.receive("$bytes")
-
-        # Convert bytes to PSObject in Python
-        ps_obj = PSObject.from_bytes(ps_bytes_raw)
-
-        # Print each process info
-        for process in ps_obj["Items"]:
-            print(f"Process Name: {process['Name']}, ID: {process['Id']}, Memory: {process['WorkingSet64']} bytes")
-
-        # Modify the process names in Python
-        for process in ps_obj["Items"]:
-            process["Name"] = f"Modified_{process['Name']}"
-        
-        # Send modified object back to PowerShell
-        bridge.send(ps_obj.to_bytes(), "$processes")
-        bridge.deserialize("$processes")
-        
-        # Verify changes in PowerShell
-        res = shell.run("$processes | Where-Object { $_.Name -like 'Modified_*' }")
-        print("\nModified Processes in PowerShell:")
-        print(res.out)
-
-```
-
-**Performance:** 5-150 MB/s depending on data size. Requires `win_pwsh.dll` (Windows only).
-
-See [Zero-Copy Bridge guide](wiki/Usage/Zero-Copy%20Bridge.md) for complete documentation.
+Typical throughput: **5–150 MB/s**
+See the full guide in the wiki.
 
 ---
 
-## PowerShell object proxies
+### 🧩 PowerShell object proxies
 
-`Shell.generate_psobject` reflects a PowerShell object into a Python `Protocol`, while `Shell.make_proxy` creates a live proxy that forwards attribute access back into PowerShell. Together they give you IDE-friendly, type-hinted automation.
+Generate Python `Protocol`s from PowerShell types and control live objects with IDE-friendly type hints.
 
 ```python
-from virtualshell import Shell
-from StreamWriter import StreamWriter  # generated via Shell().generate_psobject
-from StreamReader import StreamReader
+proxy = sh.make_proxy(
+    "StreamWriterProxy",
+    "System.IO.StreamWriter('test.txt')"
+)
 
-with Shell(strip_results=True, timeout_seconds=60) as sh:
-    proxy_writer: StreamWriter = sh.make_proxy("StreamWriterProxy", "System.IO.StreamWriter('test.txt')") # type-hinted proxy (StreamWriter made via generate_psobject)
-
-    proxy_writer.WriteLine("Test Line 1!")
-    proxy_writer.WriteLine("Test Line 2!")
-    proxy_writer.WriteLine("Test Line 3!")
-    proxy_writer.Flush()
-    proxy_writer.Close()
-
-    proxy_reader: StreamReader = sh.make_proxy("StreamReaderProxy", "System.IO.StreamReader('test.txt')")
-
-    while not proxy_reader.EndOfStream:
-        print(f"Read: {proxy_reader.ReadLine()}")
+proxy.WriteLine("Hello")
+proxy.Close()
 ```
 
-Detailed guides live in the wiki: [generate_psobject](wiki/Usage/generate_psobject.md) and [make_proxy](wiki/Usage/make_proxy.md).
+📖 Docs:
+
+* `generate_psobject`
+* `make_proxy`
 
 ---
 
-## Core API overview
+## 🧰 Core API overview
 
-| Method | Purpose |
-| --- | --- |
-| `Shell.run(cmd, *, timeout=None, raise_on_error=False)` | Execute a single command synchronously. |
-| `Shell.run_async(cmd, *, callback=None, timeout=None)` | Schedule a command; returns a `concurrent.futures.Future`. |
-| `Shell.script(path, args=None, *, timeout=None, dot_source=False, raise_on_error=False)` | Execute `.ps1` files with positional or named arguments. |
-| `Shell.script_async(...)` | Async counterpart of `script`. |
-| `Shell.save_session()` | Persist the current session to an XML snapshot. |
-| `Shell.pwsh(text)` | Safely echo a literal PowerShell string (auto quoting). |
-| `Shell.make_proxy(type_name, object_expression, *, depth=4)` | Create a live PowerShell object proxy. |
-| `Shell.generate_psobject(type_expression, output_path)` | Generate a Python `Protocol` for a PowerShell object type. |
-
-More helpers live in the wiki, including session restore, batching, and diagnostic tips.
+| Method                         | Description                     |
+| ------------------------------ | ------------------------------- |
+| `Shell.run(...)`               | Execute a command synchronously |
+| `Shell.run_async(...)`         | Schedule async execution        |
+| `Shell.script(...)`            | Run `.ps1` files                |
+| `Shell.save_session()`         | Persist session snapshot        |
+| `Shell.make_proxy(...)`        | Create live PS object proxy     |
+| `Shell.generate_psobject(...)` | Generate Python `Protocol`s     |
 
 ---
 
-## Configuration
+## ⚙️ Configuration example
 
 ```python
-from virtualshell import Shell
-
-shell = Shell(
+Shell(
     powershell_path="C:/Program Files/PowerShell/7/pwsh.exe",
     working_directory="C:/automation",
     environment={"MY_FLAG": "1"},
     timeout_seconds=10,
     auto_restart_on_timeout=True,
-    stdin_buffer_size=64 * 1024,
     initial_commands=[
         "$ErrorActionPreference = 'Stop'",
         "$ProgressPreference = 'SilentlyContinue'",
     ],
-    set_UTF8=True,
-    strip_results=False,
 )
-
-shell.start()
-```
-
-Configuration is applied before the process starts. You can inspect later with `shell._core.get_config()`.
-
----
-
-## Performance
-
-Up-to-date benchmark artefacts (`bench.json`, `bench.csv`) and analysis live in [wiki/Project/Benchmarks.md](wiki/Project/Benchmarks.md). Headline numbers from the latest run (Windows 11, Python 3.13):
-
-- Sequential commands: ~3.5 ms average
-- Batch commands: ~3.2 ms per command
-- Async latency: ~1.9–2.4 ms with 50 outstanding tasks
-- Session save: ~0.30 s median
-
-See the wiki for charts and methodology.
-
----
-
-## Building from source
-
-Dependencies:
-
-- Python 3.8+
-- CMake 3.20+
-- A C++17 compiler (MSVC, Clang, or GCC)
-- `scikit-build-core`, `pybind11`
-
-```bash
-python -m pip install -U build
-python -m build
-python -m pip install dist/virtualshell-*.whl
 ```
 
 ---
 
-## Learn more
+## 📈 Performance
 
-- [Usage guides](wiki/Usage)
-- [Performance tips](wiki/Usage/Performance%20Tips.md)
-- [Benchmarks](wiki/Project/Benchmarks.md)
+Latest benchmarks (Windows 11, Python 3.13):
 
-Bug reports and feature requests are welcome via issues or discussions.
+* ~3.5 ms per sequential command
+* ~3.2 ms per batch command
+* ~2 ms async latency
+* ~0.3 s session save
+
+Full methodology and charts live in the wiki.
 
 ---
 
-## Getting Help
+## 📚 Learn more
 
-- 📚 [Full documentation](https://github.com/Chamoswor/virtualshell/wiki)
-- 🐛 [Report issues](https://github.com/Chamoswor/virtualshell/issues)
-- 💬 [Discussions](https://github.com/Chamoswor/virtualshell/discussions)
+* 📖 [Documentation wiki](https://github.com/Chamoswor/virtualshell/wiki)
+* 🐛 [Issues](https://github.com/Chamoswor/virtualshell/issues)
+* 💬 [Discussions](https://github.com/Chamoswor/virtualshell/discussions)
 
 ---
 
