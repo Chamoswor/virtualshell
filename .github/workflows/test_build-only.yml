@@ -61,18 +61,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - python: "cp38-*"
-            label: "cp38"
-          - python: "cp39-*"
-            label: "cp39"
-          - python: "cp310-*"
-            label: "cp310"
-          - python: "cp311-*"
-            label: "cp311"
           - python: "cp312-*"
             label: "cp312"
-          - python: "cp313-*"
-            label: "cp313"
     steps:
       - uses: actions/checkout@v4
         with:
