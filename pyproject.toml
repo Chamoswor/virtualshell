@@ -3,7 +3,6 @@ requires = [
   "scikit-build-core>=0.9",
   "pybind11>=2.12",
   "setuptools_scm>=8",
-  "ninja; platform_system=='Windows'",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -36,7 +35,6 @@ write_to = "src/virtualshell/_version.py"
 cmake.version = ">=3.20"
 cmake.build-type = "Release"
 ninja.make-fallback = true
-ninja.version = ">=1.11"
 cmake.args = ["-G", "Ninja"]
 cmake.define = { PYBIND11_FINDPYTHON = "ON", CMAKE_CXX_STANDARD = "17", CMAKE_POSITION_INDEPENDENT_CODE = "ON" }
 
