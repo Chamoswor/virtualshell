@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 project(virtualshell LANGUAGES CXX)
 
 if(MSVC)
+  # MSVC typically works once VS Build Tools env is active
 else()
+  # If no compiler is found at all, make error clearer (works cross-platform)
   if(NOT CMAKE_CXX_COMPILER)
     message(FATAL_ERROR
       "No C++ compiler found.\n"
@@ -88,6 +90,7 @@ install(TARGETS _core
   RUNTIME DESTINATION virtualshell
   ARCHIVE DESTINATION virtualshell
 )
+
 
 
 
