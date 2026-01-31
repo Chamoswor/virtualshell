@@ -84,16 +84,3 @@ install(TARGETS _core
   RUNTIME DESTINATION virtualshell
   ARCHIVE DESTINATION virtualshell
 )
-
-
-
-
-
-
-
-
-
-
-
-
-
