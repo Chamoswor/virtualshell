@@ -13,9 +13,6 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4)
 endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
-if(WIN32)
-  target_link_libraries(_core PRIVATE Python3::Module)
-endif()
 
 find_package(pybind11 CONFIG QUIET)
 if(NOT pybind11_FOUND)
@@ -48,7 +45,9 @@ set(REQ_PY
 pybind11_add_module(_core MODULE ${SRC} ${REQ_PY})
 target_include_directories(_core PRIVATE cpp/include)
 
-if(UNIX)
+if(WIN32)
+  target_link_libraries(_core PRIVATE Python3::Module)
+elseif(UNIX)
   find_package(Threads REQUIRED)
   target_link_libraries(_core PRIVATE Threads::Threads dl)
 endif()
@@ -84,3 +83,4 @@ install(TARGETS _core
   RUNTIME DESTINATION virtualshell
   ARCHIVE DESTINATION virtualshell
 )
+
