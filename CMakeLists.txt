@@ -41,10 +41,6 @@ pybind11_add_module(_core MODULE ${SRC} ${REQ_PY})
 target_link_libraries(_core PRIVATE Python3::Module)
 target_include_directories(_core PRIVATE cpp/include)
 
-if(MSVC)
-  target_compile_options(_core PRIVATE /wd STL4038)
-endif()
-
 if(UNIX)
   find_package(Threads REQUIRED)
   target_link_libraries(_core PRIVATE Threads::Threads dl)
@@ -83,6 +79,7 @@ install(TARGETS _core
   RUNTIME DESTINATION virtualshell
   ARCHIVE DESTINATION virtualshell
 )
+
 
 
 
