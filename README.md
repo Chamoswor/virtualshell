@@ -262,7 +262,3 @@ Full methodology and charts live in the wiki.
 * 📖 [Documentation wiki](https://github.com/Chamoswor/virtualshell/wiki)
 * 🐛 [Issues](https://github.com/Chamoswor/virtualshell/issues)
 * 💬 [Discussions](https://github.com/Chamoswor/virtualshell/discussions)
-
----
-
-Licensed under the Apache 2.0 license. See [LICENSE](LICENSE).
