@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   wheels-linux-x86_64:
-    if: ${{ inputs.target == '*' || 'linux-x86_64' }}
+    if: inputs.target == '*' || inputs.target == 'linux-x86_64'
     name: Wheels (Linux x86_64)
     runs-on: ubuntu-latest
     strategy:
@@ -62,7 +62,7 @@ jobs:
           overwrite: true
 
   wheels-linux-aarch64:
-    if: ${{ inputs.target == '*' || 'linux-aarch64' }}
+    if: inputs.target == '*' || inputs.target == 'linux-aarch64'
     name: Wheels (Linux aarch64)
     runs-on: ubuntu-latest
     strategy:
@@ -112,7 +112,7 @@ jobs:
           overwrite: true
 
   wheels-macos:
-    if: ${{ inputs.target == '*' || 'macos' }}
+    if: inputs.target == '*' || inputs.target == 'macos'
     name: Wheels (universal2 macOS)
     runs-on: macos-latest
     strategy:
@@ -168,7 +168,7 @@ jobs:
           overwrite: true
 
   wheels-windows:
-    if: ${{ inputs.target == '*' || 'windows' }}
+    if: inputs.target == '*' || inputs.target == 'windows'
     name: Wheels (Windows x64)
     runs-on: windows-latest
     strategy:
