@@ -35,8 +35,9 @@ write_to = "src/virtualshell/_version.py"
 [tool.scikit-build]
 cmake.version = ">=3.20"
 cmake.build-type = "Release"
-cmake.generator = "Ninja"
 ninja.make-fallback = true
+ninja.version = ">=1.11"
+cmake.args = ["-G", "Ninja"]
 cmake.define = { PYBIND11_FINDPYTHON = "ON", CMAKE_CXX_STANDARD = "17", CMAKE_POSITION_INDEPENDENT_CODE = "ON" }
 
 [tool.scikit-build.sdist]
