@@ -1,9 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
 project(virtualshell LANGUAGES CXX)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# Always locate Python (extension-friendly)
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+
+# pybind11 from build env (pip installs it via pyproject requires)
 find_package(pybind11 CONFIG QUIET)
 if(NOT pybind11_FOUND)
-  find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
   execute_process(
     COMMAND ${Python3_EXECUTABLE} -c "import pybind11; print(pybind11.get_cmake_dir())"
     OUTPUT_VARIABLE pybind11_DIR
@@ -17,10 +24,6 @@ if(NOT pybind11_FOUND)
   endif()
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
 set(SRC
   cpp/src/binder.cpp
   cpp/src/io_pump.cpp
@@ -28,13 +31,6 @@ set(SRC
   cpp/src/virtual_shell.cpp
   cpp/src/py_proxy.cpp
 )
-
-# Output: site-packages/virtualshell (wheel) vs src/virtualshell (editable)
-if(DEFINED ENV{SKBUILD_STATE} AND "$ENV{SKBUILD_STATE}" STREQUAL "editable")
-  set(_VS_OUTDIR "${PROJECT_SOURCE_DIR}/src/virtualshell")
-else()
-  set(_VS_OUTDIR "${SKBUILD_PLATLIB_DIR}/virtualshell")
-endif()
 
 set(REQ_PY
   cpp/include/py_bridge.hpp
@@ -47,6 +43,16 @@ target_include_directories(_core PRIVATE cpp/include)
 if(UNIX)
   find_package(Threads REQUIRED)
   target_link_libraries(_core PRIVATE Threads::Threads dl)
+endif()
+
+# Output dir: scikit-build vs manual CMake
+if(DEFINED ENV{SKBUILD_STATE} AND "$ENV{SKBUILD_STATE}" STREQUAL "editable")
+  set(_VS_OUTDIR "${PROJECT_SOURCE_DIR}/src/virtualshell")
+elseif(DEFINED SKBUILD_PLATLIB_DIR)
+  set(_VS_OUTDIR "${SKBUILD_PLATLIB_DIR}/virtualshell")
+else()
+  # manual CMake build fallback
+  set(_VS_OUTDIR "${CMAKE_CURRENT_BINARY_DIR}/virtualshell")
 endif()
 
 set_target_properties(_core PROPERTIES
@@ -72,5 +78,7 @@ install(TARGETS _core
   RUNTIME DESTINATION virtualshell
   ARCHIVE DESTINATION virtualshell
 )
+
+
 
 
