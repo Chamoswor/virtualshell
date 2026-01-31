@@ -13,6 +13,9 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4)
 endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+if(WIN32)
+  target_link_libraries(_core PRIVATE Python3::Module)
+endif()
 
 find_package(pybind11 CONFIG QUIET)
 if(NOT pybind11_FOUND)
@@ -43,7 +46,6 @@ set(REQ_PY
 )
 
 pybind11_add_module(_core MODULE ${SRC} ${REQ_PY})
-target_link_libraries(_core PRIVATE Python3::Module)
 target_include_directories(_core PRIVATE cpp/include)
 
 if(UNIX)
@@ -51,13 +53,11 @@ if(UNIX)
   target_link_libraries(_core PRIVATE Threads::Threads dl)
 endif()
 
-# Output dir: scikit-build vs manual CMake
 if(DEFINED ENV{SKBUILD_STATE} AND "$ENV{SKBUILD_STATE}" STREQUAL "editable")
   set(_VS_OUTDIR "${PROJECT_SOURCE_DIR}/src/virtualshell")
 elseif(DEFINED SKBUILD_PLATLIB_DIR)
   set(_VS_OUTDIR "${SKBUILD_PLATLIB_DIR}/virtualshell")
 else()
-  # manual CMake build fallback
   set(_VS_OUTDIR "${CMAKE_CURRENT_BINARY_DIR}/virtualshell")
 endif()
 
@@ -84,6 +84,7 @@ install(TARGETS _core
   RUNTIME DESTINATION virtualshell
   ARCHIVE DESTINATION virtualshell
 )
+
 
 
 
