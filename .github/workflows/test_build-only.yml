@@ -1,0 +1,237 @@
+name: Test Build-Only
+
+on:
+  workflow_dispatch:
+  push:
+
+concurrency:
+  group: test-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wheels-linux-x86_64:
+    name: Wheels (Linux x86_64)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "cp312-*"
+            label: "cp312"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python (host)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cibuildwheel
+        run: |
+          python -m pip install -U pip
+          python -m pip install cibuildwheel
+
+      - name: Build wheels with cibuildwheel (manylinux x86_64)
+        env:
+          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_ARCHS_LINUX: "x86_64"
+          CIBW_SKIP: "*-musllinux_* *-manylinux_i686"
+          CIBW_TEST_COMMAND: python -c "import virtualshell; print('ok')"
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+
+          CMAKE_GENERATOR: Ninja
+          PYBIND11_FINDPYTHON: "ON"
+          CIBW_BEFORE_BUILD_LINUX: "python -m pip install ninja"
+        run: |
+          python -m cibuildwheel --platform linux --output-dir wheelhouse .
+
+      - name: Upload wheels (Linux x86_64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-x86_64-${{ matrix.label }}-attempt${{ github.run_attempt }}
+          path: wheelhouse/*.whl
+          overwrite: true
+
+  wheels-linux-aarch64:
+    name: Wheels (Linux aarch64)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "cp38-*"
+            label: "cp38"
+          - python: "cp39-*"
+            label: "cp39"
+          - python: "cp310-*"
+            label: "cp310"
+          - python: "cp311-*"
+            label: "cp311"
+          - python: "cp312-*"
+            label: "cp312"
+          - python: "cp313-*"
+            label: "cp313"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU for cross-arch Docker
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Python (host)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cibuildwheel
+        run: |
+          python -m pip install -U pip
+          python -m pip install cibuildwheel
+
+      - name: Build wheels with cibuildwheel (manylinux aarch64 via QEMU)
+        env:
+          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_ARCHS_LINUX: "aarch64"
+          CIBW_SKIP: "*-musllinux_*"
+          CIBW_TEST_COMMAND: python -c "import virtualshell; print('ok')"
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          CMAKE_GENERATOR: Ninja
+          PYBIND11_FINDPYTHON: "ON"
+          CIBW_BEFORE_BUILD_LINUX: "python -m pip install ninja"
+        run: |
+          python -m cibuildwheel --platform linux --output-dir wheelhouse .
+
+      - name: Upload wheels (Linux aarch64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-aarch64-${{ matrix.label }}-attempt${{ github.run_attempt }}
+          path: wheelhouse/*.whl
+          overwrite: true
+
+  wheels-macos:
+    name: Wheels (universal2 macOS)
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "cp38-*"
+            label: "cp38"
+          - python: "cp39-*"
+            label: "cp39"
+          - python: "cp310-*"
+            label: "cp310"
+          - python: "cp311-*"
+            label: "cp311"
+          - python: "cp312-*"
+            label: "cp312"
+          - python: "cp313-*"
+            label: "cp313"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python (host)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cibuildwheel
+        run: |
+          python -m pip install -U pip
+          python -m pip install cibuildwheel
+
+      - name: Build wheels with cibuildwheel (universal2)
+        env:
+          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_ARCHS_MACOS: "universal2"
+          CIBW_MACOSX_DEPLOYMENT_TARGET: "11.0"               
+          CIBW_TEST_COMMAND: python -c "import virtualshell; print('ok')"
+          CIBW_BUILD_VERBOSITY: "1"
+          CIBW_BEFORE_BUILD_MACOS: "python -m pip install ninja"
+
+          CMAKE_ARGS: >-
+            -G Ninja
+            -DCMAKE_OSX_ARCHITECTURES=arm64;x86_64
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+          PYBIND11_FINDPYTHON: "ON"
+          CMAKE_GENERATOR: "Ninja"
+          CMAKE_OSX_ARCHITECTURES: "arm64;x86_64"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "11.0"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+        run: |
+          python -m cibuildwheel --platform macos --output-dir wheelhouse .
+
+      - name: Upload wheels (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.label }}-attempt${{ github.run_attempt }}
+          path: wheelhouse/*.whl
+          overwrite: true
+
+  wheels-windows:
+    name: Wheels (Windows x64)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["cp38-win_amd64", "cp39-win_amd64", "cp310-win_amd64", "cp311-win_amd64", "cp312-win_amd64", "cp313-win_amd64"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python (host)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cibuildwheel
+        run: |
+          py -3 -m pip install -U pip
+          py -3 -m pip install cibuildwheel
+
+      - name: Build wheels with cibuildwheel (MSVC)
+        env:
+          CIBW_BUILD: ${{ matrix.python }}
+          CIBW_SKIP: "*-win32"
+          CIBW_TEST_COMMAND: python -c "import virtualshell; print('ok')"
+          CIBW_ENVIRONMENT_WINDOWS: >
+            CMAKE_GENERATOR="Visual Studio 17 2022"
+            CMAKE_GENERATOR_PLATFORM="x64"
+            PYBIND11_FINDPYTHON=ON
+        run: |
+          py -3 -m cibuildwheel --output-dir wheelhouse .
+
+      - name: Upload wheels (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.python }}-attempt${{ github.run_attempt }}
+          path: wheelhouse\*.whl
+          overwrite: true
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: |
+          python -m pip install -U pip build twine
+          python -m build --sdist --outdir dist .
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          
