@@ -1,27 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 project(virtualshell LANGUAGES CXX)
 
-if(MSVC)
-  # MSVC typically works once VS Build Tools env is active
-else()
-  # If no compiler is found at all, make error clearer (works cross-platform)
-  if(NOT CMAKE_CXX_COMPILER)
-    message(FATAL_ERROR
-      "No C++ compiler found.\n"
-      "Windows: install 'Visual Studio Build Tools' with 'Desktop development with C++', "
-      "then run in 'x64 Native Tools Command Prompt for VS', or set CXX to your compiler.\n"
-      "Example: set CXX=cl (MSVC) or set CXX=clang++.\n"
-    )
-  endif()
-endif()
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# ALWAYS find Python first (needed for correct linking on Windows)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
-find_package(pybind11 CONFIG QUIET)
 
+# Then find pybind11
+find_package(pybind11 CONFIG QUIET)
 if(NOT pybind11_FOUND)
   execute_process(
     COMMAND ${Python3_EXECUTABLE} -c "import pybind11; print(pybind11.get_cmake_dir())"
@@ -50,6 +38,7 @@ set(REQ_PY
 )
 
 pybind11_add_module(_core MODULE ${SRC} ${REQ_PY})
+target_link_libraries(_core PRIVATE Python3::Module)
 target_include_directories(_core PRIVATE cpp/include)
 
 if(UNIX)
@@ -90,6 +79,7 @@ install(TARGETS _core
   RUNTIME DESTINATION virtualshell
   ARCHIVE DESTINATION virtualshell
 )
+
 
 
 
