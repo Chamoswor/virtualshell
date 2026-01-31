@@ -11,7 +11,11 @@
 #include <sstream>
 #include <fstream>
 #include <regex>
+// NOTE:
+// <format> is required on some platforms (MSVC/libstdc++)
+// even in C++17, due to STL/pybind11 internal dependencies.
 #include <format>
+
 #include <atomic>
 #include <unordered_set>
 #include <algorithm>
