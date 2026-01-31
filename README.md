@@ -12,8 +12,6 @@ Run PowerShell commands with *millisecond latency*, persistent sessions, async e
 > 🔗 **Full documentation lives in the [wiki](https://github.com/Chamoswor/virtualshell/wiki)**
 > This README focuses on *what it is*, *why it matters*, and *how to get started fast*.
 
----
-
 ## ✨ What is virtualshell?
 
 `virtualshell` keeps **one PowerShell host warm** behind a thin Python wrapper powered by a **C++ engine**.
@@ -32,8 +30,6 @@ Perfect for:
 * long-running agents
 * CI/test harnesses
 * automation tooling that must be *fast and reliable*
-
----
 
 ## 🚀 Why use it?
 
@@ -54,8 +50,6 @@ Perfect for:
 
 * 🛠️ **Type-safe automation**
   Generate Python `Protocol`s from PowerShell objects and control them via live proxies.
-
----
 
 ## 📦 Installation
 
@@ -93,6 +87,8 @@ Use this only if you explicitly want to build locally.
    * Workload: *Desktop development with C++*
 2. Open **x64 Native Tools Command Prompt for VS**
 
+---
+
 ```bash
 pip install virtualshell --no-binary virtualshell
 ```
@@ -126,8 +122,6 @@ with Shell(timeout_seconds=5) as sh:
     print(sh.run("Inc").out.strip())  # 2
 ```
 
----
-
 ### Async execution
 
 ```python
@@ -143,8 +137,6 @@ async def main():
 
 asyncio.run(main())
 ```
-
----
 
 ### Running scripts with arguments
 
@@ -165,8 +157,6 @@ All execution APIs support:
 * per-call timeouts
 * `raise_on_error`
 * callbacks
-
----
 
 ## 🧠 Advanced features
 
