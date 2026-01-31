@@ -5,10 +5,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# ALWAYS find Python first (needed for correct linking on Windows)
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+  message(FATAL_ERROR
+    "32-bit build detected (x86). virtualshell requires 64-bit (x64).\n"
+    "Open 'x64 Native Tools Command Prompt for VS' and retry."
+  )
+endif()
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 
-# Then find pybind11
 find_package(pybind11 CONFIG QUIET)
 if(NOT pybind11_FOUND)
   execute_process(
@@ -79,6 +84,7 @@ install(TARGETS _core
   RUNTIME DESTINATION virtualshell
   ARCHIVE DESTINATION virtualshell
 )
+
 
 
 
