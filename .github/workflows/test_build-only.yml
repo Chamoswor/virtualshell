@@ -2,7 +2,6 @@ name: Test Build-Only
 
 on:
   workflow_dispatch:
-  push:
 
 concurrency:
   group: test-build-${{ github.ref }}
