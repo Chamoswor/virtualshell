@@ -300,7 +300,6 @@ jobs:
       contents: read
       id-token: write
 
-    # Anbefalt: bind publisering til et environment (bruk samme navn i PyPI Trusted Publisher)
     environment:
       name: release
       url: https://pypi.org/p/virtualshell
