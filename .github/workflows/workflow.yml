@@ -198,12 +198,14 @@ jobs:
           overwrite: true
 
   wheels-windows:
+    if: inputs.target == '*' || inputs.target == 'windows'
     name: Wheels (Windows x64)
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
         python: ["cp38-win_amd64", "cp39-win_amd64", "cp310-win_amd64", "cp311-win_amd64", "cp312-win_amd64", "cp313-win_amd64"]
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -215,20 +217,47 @@ jobs:
           python-version: "3.12"
 
       - name: Install cibuildwheel
+        shell: pwsh
         run: |
           py -3 -m pip install -U pip
-          py -3 -m pip install cibuildwheel
+          py -3 -m pip install -U cibuildwheel
 
       - name: Build wheels with cibuildwheel (MSVC)
+        shell: cmd
         env:
           CIBW_BUILD: ${{ matrix.python }}
           CIBW_SKIP: "*-win32"
           CIBW_TEST_COMMAND: python -c "import virtualshell; print('ok')"
+          CIBW_BUILD_VERBOSITY: "1"
           CIBW_ENVIRONMENT_WINDOWS: >
             CMAKE_GENERATOR="Visual Studio 17 2022"
-            CMAKE_GENERATOR_PLATFORM="x64"
+            CMAKE_GENERATOR_PLATFORM=x64
+            SKBUILD_CMAKE_GENERATOR="Visual Studio 17 2022"
             PYBIND11_FINDPYTHON=ON
+            CMAKE_BUILD_TYPE=Release
         run: |
+          @echo on
+
+          REM Find latest VS and load MSVC environment
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSINSTALL=%%i
+          if not defined VSINSTALL (
+            echo ERROR: Visual Studio with C++ tools not found.
+            exit /b 1
+          )
+
+          call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64
+
+          set CC=
+          set CXX=
+          set CMAKE_C_COMPILER=
+          set CMAKE_CXX_COMPILER=
+
+          REM Debug: verify we are on MSVC
+          where cl
+          cl /Bv
+          where cmake
+          where ninja
+
           py -3 -m cibuildwheel --output-dir wheelhouse .
 
       - name: Upload wheels (Windows)
