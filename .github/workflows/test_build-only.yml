@@ -204,6 +204,7 @@ jobs:
             CMAKE_GENERATOR_PLATFORM=x64
             SKBUILD_CMAKE_GENERATOR="Visual Studio 17 2022"
             PYBIND11_FINDPYTHON=ON
+            CMAKE_BUILD_TYPE=Release
         run: |
           @echo on
 
