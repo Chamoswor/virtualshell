@@ -7,6 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if (NOT MSVC)
+  message(FATAL_ERROR "vs_shm requires MSVC (/clr). MinGW/Clang on Windows is not supported for this target.")
+endif()
+
 # Zero-copy bridge library with clean API
 add_library(_vs_shm SHARED
   src/vs_shm.cpp

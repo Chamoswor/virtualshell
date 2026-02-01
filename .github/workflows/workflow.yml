@@ -227,6 +227,8 @@ jobs:
           CIBW_ENVIRONMENT_WINDOWS: >
             CMAKE_GENERATOR="Visual Studio 17 2022"
             CMAKE_GENERATOR_PLATFORM="x64"
+            CC=cl
+            CXX=cl
             PYBIND11_FINDPYTHON=ON
         run: |
           py -3 -m cibuildwheel --output-dir wheelhouse .

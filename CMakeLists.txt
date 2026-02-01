@@ -94,7 +94,7 @@ install(TARGETS _core
 )
 
 # Build and link the vs_shm library on Windows
-if(WIN32)
+if(WIN32 AND MSVC)
   add_subdirectory(cpp/lib/vs_shm)
 
   set_target_properties(_vs_shm PROPERTIES
