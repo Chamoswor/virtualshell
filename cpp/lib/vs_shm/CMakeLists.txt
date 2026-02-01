@@ -11,6 +11,15 @@ if (NOT MSVC)
   message(FATAL_ERROR "vs_shm requires MSVC (/clr). MinGW/Clang on Windows is not supported for this target.")
 endif()
 
+if(MSVC)
+  foreach(lang C CXX)
+    foreach(cfg DEBUG RELWITHDEBINFO)
+      string(REPLACE "/RTC1" "" CMAKE_${lang}_FLAGS_${cfg} "${CMAKE_${lang}_FLAGS_${cfg}}")
+      string(REPLACE "/RTC"  "" CMAKE_${lang}_FLAGS_${cfg} "${CMAKE_${lang}_FLAGS_${cfg}}")
+    endforeach()
+  endforeach()
+endif()
+
 # Zero-copy bridge library with clean API
 add_library(_vs_shm SHARED
   src/vs_shm.cpp

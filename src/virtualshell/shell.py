@@ -18,11 +18,10 @@ from pathlib import Path
 from typing import Iterable, List, Dict, Optional, Callable, Any, Union, Protocol, TYPE_CHECKING, cast, overload, Sequence, TypeVar
 from concurrent.futures import Future
 from .generate_psobject import generate
+from . import _globals as _g
 
 _CPP_MODULE: Any = None
-
-if TYPE_CHECKING:
-    from . import _globals as _g
+    
 
 try:
     _CPP_MODULE = importlib.import_module(_g._VS_CORE_CPP_MODULE)

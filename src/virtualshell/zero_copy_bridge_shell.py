@@ -16,6 +16,7 @@ from datetime import datetime
 import base64
 import json
 from dataclasses import dataclass
+from . import _globals as _g
 
 if TYPE_CHECKING:
     from .shell import Shell
@@ -27,9 +28,6 @@ _IS_WINDOWS = os.name == "nt"
 # =============================================================================
 # DLL LOADING
 # =============================================================================
-
-if TYPE_CHECKING:
-    from . import _globals as _g
 
 def _load_win_dll() -> tuple[Optional[Path], Optional[ctypes.CDLL]]:
     """Attempt to load the Windows DLL, returning path and handle when available."""
