@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 build/
+out/
 *.egg-info/
 test/
 .pypirc

@@ -2,6 +2,8 @@
 #pragma once
 #pragma managed
 
+
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -22,7 +24,7 @@ using namespace System::Runtime::InteropServices;
 // MANAGED SERIALIZATION LOGIC
 // =============================================================================
 
-array<Byte>^ SerializeObjectToBytes(Object^ obj, String^ encoding) {
+static array<Byte>^ SerializeObjectToBytes(Object^ obj, String^ encoding) {
     if (obj == nullptr) {
         return gcnew array<Byte>(0);
     }
@@ -40,7 +42,7 @@ array<Byte>^ SerializeObjectToBytes(Object^ obj, String^ encoding) {
 
     // Unwrap PSObject if needed
     PSObject^ psObj = dynamic_cast<PSObject^>(obj);
-    if (psObj != nullptr) {
+    if (static_cast<Object^>(psObj) != nullptr) {
         obj = psObj->BaseObject;
         
         if (obj->GetType() == array<Byte>::typeid) {
@@ -137,7 +139,7 @@ void FreeManagedBytes(unsigned char* bytes) {
 // DIRECT CHUNKED SEND (MANAGED FAST PATH)
 // =============================================================================
 
-int SendPinnedBytesToPython(VS_Channel handle, const unsigned char* basePtr, uint64_t totalSize, uint64_t chunkSize, uint32_t timeoutMs) {
+static int SendPinnedBytesToPython(VS_Channel handle, const unsigned char* basePtr, uint64_t totalSize, uint64_t chunkSize, uint32_t timeoutMs) {
     if (chunkSize == 0) {
         chunkSize = totalSize > 0 ? totalSize : 1;
     }

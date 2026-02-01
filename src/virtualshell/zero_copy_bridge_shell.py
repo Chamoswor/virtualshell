@@ -20,7 +20,7 @@ from dataclasses import dataclass
 if TYPE_CHECKING:
     from .shell import Shell
 
-__all__ = ["ZeroCopyBridge", "find_dll", "PSObject"]
+__all__ = ["ZeroCopyBridge", "PSObject"]
 
 _IS_WINDOWS = os.name == "nt"
 
@@ -28,45 +28,18 @@ _IS_WINDOWS = os.name == "nt"
 # DLL LOADING
 # =============================================================================
 
-def find_dll() -> Path:
-    """Find win_pwsh.dll."""
-    if not _IS_WINDOWS:
-        raise RuntimeError("win_pwsh.dll is only available on Windows platforms")
-
-    if env_path := os.environ.get("VIRTUALSHELL_WIN_PWSH_DLL"):
-        dll_path = Path(env_path)
-        if dll_path.is_file():
-            return dll_path
-        elif dll_path.is_dir():
-            dll_path = dll_path / "win_pwsh.dll"
-            if dll_path.exists():
-                return dll_path
-    
-    script_dir = Path(__file__).parent
-    candidates = [
-        script_dir / "win_pwsh.dll",
-        script_dir.parent.parent / "build" / "win_pwsh_dll" / "Release" / "win_pwsh.dll",
-        script_dir.parent.parent / "build" / "win_pwsh_dll" / "Debug" / "win_pwsh.dll",
-        script_dir.parent.parent / "win_pwsh_dll" / "bin" / "win_pwsh.dll",
-    ]
-    
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    
-    raise FileNotFoundError("win_pwsh.dll not found. Set VIRTUALSHELL_WIN_PWSH_DLL environment variable.")
-
+if TYPE_CHECKING:
+    from . import _globals as _g
 
 def _load_win_dll() -> tuple[Optional[Path], Optional[ctypes.CDLL]]:
     """Attempt to load the Windows DLL, returning path and handle when available."""
     if not _IS_WINDOWS:
         return None, None
 
-    dll_path = find_dll()
     try:
-        return dll_path, ctypes.CDLL(str(dll_path))
+        return _g._VS_SHM_CPP_MODULE_PATH, ctypes.CDLL(str(_g._VS_SHM_CPP_MODULE_PATH))
     except OSError as exc:
-        raise RuntimeError(f"Failed to load win_pwsh.dll from {dll_path}: {exc}") from exc
+        raise RuntimeError(f"Failed to load module from {_g._VS_SHM_CPP_MODULE_PATH}: {exc}") from exc
 
 # Load DLL (Windows only)
 _dll_path, _dll = _load_win_dll()

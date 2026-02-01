@@ -901,7 +901,7 @@ uint64_t VirtualShell::nextCommandId_() {
 std::unique_ptr<VirtualShell::CmdState>
 VirtualShell::createCmdState_(uint64_t id,
                               double timeoutSeconds,
-                              std::function<void(const ExecutionResult&)> cb) {
+                              std::function<void(const ExecutionResult&)> cb) const {
     using clock = std::chrono::steady_clock;
 
     auto state = std::make_unique<CmdState>();
@@ -1049,18 +1049,18 @@ void VirtualShell::onChunk_(bool isErr, std::string_view sv) {
 
     VSHELL_DBG("IO", "read %s bytes=%zu", isErr ? "STDERR" : "STDOUT", sv.size());
 
-    std::unique_lock<std::mutex> lk(stateMx_);
-
     if (isErr) {
-        // Stderr carries timeout sentinels and error text; handle separately before returning to readers.
-        handleErrorChunk_(lk, sv);
+        handleErrorChunk_(sv);
         return;
     }
 
-    handleOutputChunk_(lk, sv);
+    handleOutputChunk_(sv);
 }
 
-void VirtualShell::handleErrorChunk_(std::unique_lock<std::mutex>& lk, std::string_view sv) {
+
+void VirtualShell::handleErrorChunk_(std::string_view sv) {
+    std::unique_lock<std::mutex> lk(stateMx_);
+
     std::string chunk(sv.data(), sv.size());
 
     CmdState* st = nullptr;
@@ -1085,13 +1085,16 @@ void VirtualShell::handleErrorChunk_(std::unique_lock<std::mutex>& lk, std::stri
 
     if (completeFromSentinel && st) {
         auto done = eraseStateLocked_(stId);
+
         lk.unlock();
         fulfillTimeout_(std::move(done), false);
-        lk.lock();
     }
 }
 
-void VirtualShell::handleOutputChunk_(std::unique_lock<std::mutex>& lk, std::string_view sv) {
+
+void VirtualShell::handleOutputChunk_(std::string_view sv) {
+    std::unique_lock<std::mutex> lk(stateMx_);
+
     enqueueStreamChunk_(false, sv);
     std::string carry(sv.data(), sv.size());
 
@@ -1100,7 +1103,7 @@ void VirtualShell::handleOutputChunk_(std::unique_lock<std::mutex>& lk, std::str
         auto it = inflight_.find(id);
         if (it == inflight_.end()) {
             VSHELL_DBG("PARSE", "drop expired front id=%llu (pre-begun=%d)",
-                       static_cast<unsigned long long>(id), 0);
+                static_cast<unsigned long long>(id), 0);
             inflightOrder_.pop_front();
             continue;
         }
@@ -1119,6 +1122,7 @@ void VirtualShell::handleOutputChunk_(std::unique_lock<std::mutex>& lk, std::str
         completeCmdLocked_(state, /*success=*/true);
         (void)eraseStateLocked_(id);
 
+        // Denne kan i praksis gjøres uten unlock/lock (atomic), men beholdes om du ønsker mindre lock-hold-tid.
         lk.unlock();
         inflightCount_.fetch_sub(1, std::memory_order_relaxed);
         lk.lock();
@@ -1126,6 +1130,7 @@ void VirtualShell::handleOutputChunk_(std::unique_lock<std::mutex>& lk, std::str
         carry.swap(nextCarry);
     }
 }
+
 
 bool VirtualShell::stripTimeoutSentinel_(std::string& chunk, CmdState* st) {
     bool completeFromSentinel = false;

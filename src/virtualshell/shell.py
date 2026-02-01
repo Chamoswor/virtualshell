@@ -21,8 +21,11 @@ from .generate_psobject import generate
 
 _CPP_MODULE: Any = None
 
+if TYPE_CHECKING:
+    from . import _globals as _g
+
 try:
-    _CPP_MODULE = importlib.import_module(f"{__package__}._core")
+    _CPP_MODULE = importlib.import_module(_g._VS_CORE_CPP_MODULE)
 except Exception as e:
     raise ImportError(
         "Failed to import the compiled extension 'virtualshell._core'. "

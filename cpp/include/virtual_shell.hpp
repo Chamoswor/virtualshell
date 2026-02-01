@@ -510,11 +510,11 @@ private:
     /**
      * @brief Apply stderr-specific handling (sentinels, ordering) while holding the lock.
      */
-    void handleErrorChunk_(std::unique_lock<std::mutex>& lk, std::string_view chunk);
+    void handleErrorChunk_(std::string_view chunk);
     /**
      * @brief Apply stdout-specific handling while holding the lock.
      */
-    void handleOutputChunk_(std::unique_lock<std::mutex>& lk, std::string_view chunk);
+    void handleOutputChunk_(std::string_view chunk);
     /**
      * @brief Ensure we have registered command metadata before processing output.
      */
@@ -545,7 +545,7 @@ private:
      */
     std::unique_ptr<CmdState> createCmdState_(uint64_t id,
                                               double timeoutSeconds,
-                                              std::function<void(const ExecutionResult&)> cb);
+                                              std::function<void(const ExecutionResult&)> cb) const;
     /**
      * @brief Register a command state (stateMx_ must already be locked).
      */
@@ -565,7 +565,7 @@ private:
      */
     bool sendInitialCommands_();
 
-    void removeNewlineFromQuoteEscape_(std::string& cmd);
+    //void removeNewlineFromQuoteEscape_(std::string& cmd);
 
     /**
      * @internal
