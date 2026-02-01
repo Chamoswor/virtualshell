@@ -163,7 +163,6 @@ All execution APIs support:
 ### 🔌 Zero-Copy Bridge (Windows only)
 
 > High-throughput shared-memory transfer between Python and PowerShell
-> Requires `win_pwsh.dll`
 
 Ideal for large binary blobs, files, or high-frequency data exchange.
 
