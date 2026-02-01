@@ -36,7 +36,7 @@ cmake.version = ">=3.20"
 cmake.build-type = "Release"
 ninja.make-fallback = true
 cmake.args = ["-G", "Ninja"]
-cmake.define = { PYBIND11_FINDPYTHON = "ON", CMAKE_CXX_STANDARD = "17", CMAKE_POSITION_INDEPENDENT_CODE = "ON", SKBUILD_CMAKE_GENERATOR = "Visual Studio 17 2022" }
+cmake.define = { PYBIND11_FINDPYTHON = "ON", CMAKE_CXX_STANDARD = "17", CMAKE_POSITION_INDEPENDENT_CODE = "ON" }
 
 [tool.scikit-build.sdist]
 include = ["src/virtualshell/**", "cpp/**", "CMakeLists.txt", "README.md", "LICENSE", "pyproject.toml"]
