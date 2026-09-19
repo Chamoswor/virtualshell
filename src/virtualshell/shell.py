@@ -159,12 +159,14 @@ class Shell:
             # Copy to detach from caller's dict and avoid accidental mutation.
             cfg.environment = dict(environment)
         cfg.stdin_buffer_size = int(stdin_buffer_size or 0)
-        if initial_commands:
-            # Force string-ification to prevent surprises from non-str types.
-            cfg.initial_commands = list(map(str, initial_commands))
-        
+        # Build the full list before assigning: `cfg.initial_commands` returns a
+        # *copy* of the underlying C++ vector, so in-place mutation is lost.
+        # Force string-ification to prevent surprises from non-str types.
+        initial = list(map(str, initial_commands)) if initial_commands else []
         if set_UTF8:
-            cfg.initial_commands.insert(0, "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()")
+            initial.insert(0, "$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()")
+        if initial:
+            cfg.initial_commands = initial
 
         module_dir = Path(__file__).resolve().parent
         self._restore_script_path = module_dir / "get-session.ps1"
@@ -462,8 +464,7 @@ class Shell:
             `shell.pwsh("Hello 'World'")` -> runs `Write-Output 'Hello ''World'''` semantics;
             here we only quote the literal; you still provide the full command.
         """
-        res = self.run(quote_pwsh_literal(s), timeout=timeout, raise_on_error=raise_on_error)
-        return cast(ExecutionResult, res)
+        return self.run(quote_pwsh_literal(s), timeout=timeout, raise_on_error=raise_on_error)
 
     def __enter__(self) -> "Shell":
         """Context manager entry: ensure backend is running."""

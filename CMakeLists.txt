@@ -125,4 +125,11 @@ if(WIN32 AND MSVC)
   )
 endif()
 
+# C++ tests (opt-in; never built by pip/scikit-build)
+option(VIRTUALSHELL_BUILD_TESTS "Build the C++ test suite (vs_core_tests)" OFF)
+if(VIRTUALSHELL_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(cpp/tests)
+endif()
+
 

@@ -876,7 +876,9 @@ std::string VirtualShell::build_pwsh_packet(uint64_t id, std::string_view cmd) {
     full.append(cmd);
     if (full.empty() || full.back() != '\n') full.push_back('\n'); // Ensure trailing newline
 
-    full += "[Console]::Out.WriteLine(" + virtualshell::helpers::parsers::ps_quote(end) + ")\n"; // End marker
+    // End marker carries the command's $? status as a trailing digit ("...>>>1" / "...>>>0"),
+    // read before WriteLine itself resets it. Parsed by tryFinalizeCommand_().
+    full += "[Console]::Out.WriteLine(" + virtualshell::helpers::parsers::ps_quote(end) + " + [string][int]$?)\n";
     return full;
 }
 
@@ -1215,6 +1217,17 @@ bool VirtualShell::tryFinalizeCommand_(uint64_t id,
     }
 
     size_t tail = mpos + state.endMarker.size();
+
+    // The end marker line carries the command's $? status as a trailing digit
+    // (see build_pwsh_packet). If the chunk was split right at the marker the
+    // digit has not arrived yet; keep the buffer intact and wait for more data.
+    if (tail >= state.outBuf.size()) {
+        return false;
+    }
+    if (state.outBuf[tail] == '0' || state.outBuf[tail] == '1') {
+        state.psSuccess.store(state.outBuf[tail] == '1', std::memory_order_release);
+        ++tail;
+    }
     if (tail < state.outBuf.size() && state.outBuf[tail] == '\r') ++tail;
     if (tail < state.outBuf.size() && state.outBuf[tail] == '\n') ++tail;
 
@@ -1266,9 +1279,15 @@ void VirtualShell::completeCmdLocked_(CmdState& S, bool success) {
     if (interrupted) {
         r.success = false;
         r.exitCode = -2;
+    } else if (!success || timedOut) {
+        // Protocol-level failure (stop/restart) or timeout.
+        r.success = false;
+        r.exitCode = -1;
     } else {
-        r.success = success && !timedOut; // A timed-out command cannot be reported as success.
-        r.exitCode = r.success ? 0 : -1;
+        // Completed normally: report PowerShell's own $? verdict.
+        const bool cmdOk = S.psSuccess.load(std::memory_order_acquire);
+        r.success = cmdOk;
+        r.exitCode = cmdOk ? 0 : 1;
     }
 
     r.out   = virtualshell::helpers::normalizeToUtf8(std::move(S.outBuf));

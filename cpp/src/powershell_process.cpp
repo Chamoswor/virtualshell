@@ -5,7 +5,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <cwchar>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -396,14 +398,66 @@ std::string PowerShellProcess::build_command_line_() const {
 }
 
 #ifdef _WIN32
+namespace {
+
+// Console title for the hidden child console. The console host reads startup
+// settings for a new console from HKCU\Console\<title>, so registering
+// CodePage=65001 under our own title gives the child a UTF-8 console from
+// birth. That is the only reliable way to make `pwsh -Command -` decode stdin
+// as UTF-8: its stdin reader is created during startup, before any initial
+// command (e.g. one setting [Console]::InputEncoding) could take effect.
+constexpr wchar_t kConsoleTitle[] = L"virtualshell-pwsh-host";
+
+void ensure_console_codepage_registered() {
+    HKEY key = nullptr;
+    const std::wstring path = std::wstring(L"Console\\") + kConsoleTitle;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, path.c_str(), 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+        const DWORD utf8 = 65001;
+        RegSetValueExW(key, L"CodePage", 0, REG_DWORD,
+                       reinterpret_cast<const BYTE*>(&utf8), sizeof(utf8));
+        RegCloseKey(key);
+    }
+    // On failure the child simply starts with the OEM code page, as before.
+}
+
+} // namespace
+
 std::vector<wchar_t> PowerShellProcess::build_environment_block_wide_() const {
     if (config_.environment.empty()) {
         return {};
     }
 
-    std::vector<wchar_t> block;
+    // Merge the parent environment with the configured overrides so the child
+    // keeps PATH, SystemRoot, etc. (mirrors the POSIX setenv() branch below).
+    // Environment names are case-insensitive on Windows, and CreateProcessW
+    // expects the block sorted that way.
+    struct LessICase {
+        bool operator()(const std::wstring& a, const std::wstring& b) const {
+            return _wcsicmp(a.c_str(), b.c_str()) < 0;
+        }
+    };
+    std::map<std::wstring, std::wstring, LessICase> merged;
+
+    if (LPWCH parent = ::GetEnvironmentStringsW()) {
+        for (LPWCH p = parent; *p != L'\0'; p += std::wcslen(p) + 1) {
+            std::wstring entry(p);
+            // Entries starting with '=' are hidden per-drive CWD records; skip them.
+            const size_t eq = entry.find(L'=', 1);
+            if (entry[0] != L'=' && eq != std::wstring::npos) {
+                merged[entry.substr(0, eq)] = entry.substr(eq + 1);
+            }
+        }
+        ::FreeEnvironmentStringsW(parent);
+    }
+
     for (const auto& [key, value] : config_.environment) {
-        std::wstring entry = to_wide_(key + "=" + value);
+        merged[to_wide_(key)] = to_wide_(value);
+    }
+
+    std::vector<wchar_t> block;
+    for (const auto& [key, value] : merged) {
+        std::wstring entry = key + L"=" + value;
         block.insert(block.end(), entry.begin(), entry.end());
         block.push_back(L'\0');
     }
@@ -432,6 +486,8 @@ bool PowerShellProcess::spawn_child_() {
 
     std::vector<wchar_t> env_block = build_environment_block_wide_();
 
+    ensure_console_codepage_registered();
+
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
@@ -439,6 +495,7 @@ bool PowerShellProcess::spawn_child_() {
     startup.hStdOutput = stdout_write_;
     startup.hStdError = stderr_write_;
     startup.wShowWindow = SW_HIDE;
+    startup.lpTitle = const_cast<LPWSTR>(kConsoleTitle);
 
     std::wstring working_dir_w;
     LPCWSTR working_dir_ptr = nullptr;
@@ -449,6 +506,11 @@ bool PowerShellProcess::spawn_child_() {
 
     PROCESS_INFORMATION pi{};
     DWORD creation_flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    if (!env_block.empty()) {
+        // The environment block is UTF-16; without this flag CreateProcessW
+        // would interpret it as ANSI and the child would see garbage.
+        creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+    }
 
     BOOL ok = CreateProcessW(
         nullptr,
