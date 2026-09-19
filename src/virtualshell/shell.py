@@ -7,39 +7,17 @@ into Python-friendly exceptions.
 """
 from __future__ import annotations
 
-from enum import IntEnum
-import importlib
 import secrets
 import tempfile
 import time
 import concurrent.futures as cf
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Dict, Optional, Callable, Any, Union, Protocol, TYPE_CHECKING, cast, overload, Sequence, TypeVar
+from typing import Iterable, List, Dict, Optional, Callable, Any, Union, cast, overload, Sequence
 from concurrent.futures import Future
 from .generate_psobject import generate
-from . import _globals as _g
-
-_CPP_MODULE: Any = None
-    
-
-try:
-    _CPP_MODULE = importlib.import_module(_g._VS_CORE_CPP_MODULE)
-except Exception as e:
-    raise ImportError(
-        "Failed to import the compiled extension 'virtualshell._core'. "
-        "Make sure it was built and matches this Python/platform."
-    ) from e
-
-
-# Aliases to reduce attribute lookups on the hot path.
-_CPP_VirtualShell = _CPP_MODULE.VirtualShell
-_CPP_Config       = _CPP_MODULE.Config
-_CPP_ExecResult   = _CPP_MODULE.ExecutionResult
-_CPP_BatchProg    = _CPP_MODULE.BatchProgress
-
-
-
+from . import _module
+from ._module import ExecutionResult, BatchProgress, Config, VirtualShell
+from ._protocols import ExitCode, PsProxyLike
 
 # ---------- Exceptions ----------
 # Narrow, typed exceptions help callers implement precise retry/telemetry policies.
@@ -49,38 +27,6 @@ from .errors import (
     ExecutionTimeoutError,
     ExecutionError,
 )
-
-class ExitCode(IntEnum):
-    SUCCESS = 0
-    GENERAL_ERROR = 1
-    TIMEOUT = -1
-    RESTARTING = -2  # Internal use; not from PowerShell itself.
-    NOT_RUNNING = -3  # Internal use; not from PowerShell itself.
-
-if TYPE_CHECKING:
-    class ExecutionResult(Protocol):
-        out: Any
-        err: Any
-        exit_code: ExitCode
-        success: bool
-        execution_time: float
-
-    class BatchProgress(Protocol):
-        currentCommand: int
-        totalCommands: int
-        lastResult: ExecutionResult
-        isComplete: bool
-        allResults: List[ExecutionResult]
-
-        @property
-        def header_bytes(self) -> int: ...
-
-        @property
-        def frame_bytes(self) -> int: ...
-
-else:
-    ExecutionResult = _CPP_MODULE.ExecutionResult
-    BatchProgress = _CPP_MODULE.BatchProgress
 
 # ---------- Utils ----------
 def quote_pwsh_literal(s: str) -> str:
@@ -125,7 +71,7 @@ def _strip_result_fields(res: ExecutionResult) -> ExecutionResult:
 
 
 def _raise_on_failure(
-    res: _CPP_ExecResult,
+    res: ExecutionResult,
     *,
     raise_on_error: bool,
     raise_on_timeout: bool = True,
@@ -200,8 +146,8 @@ class Shell:
         cpp_module : Any
             For testing/DI: provide a custom module exposing the C++ API surface.
         """
-        mod = cpp_module or _CPP_MODULE
-        cfg = mod.Config()
+        mod = cpp_module or _module.core
+        cfg: Config = mod.Config()
         if powershell_path:
             cfg.powershell_path = str(powershell_path)
         if working_directory:
@@ -231,8 +177,8 @@ class Shell:
         cfg.restore_script_path = str(self._restore_script_path)
         cfg.session_snapshot_path = str(self._session_path)
 
-        self._cfg = cfg
-        self._core = mod.VirtualShell(cfg)
+        self._cfg: Config = cfg
+        self._core: VirtualShell = mod.VirtualShell(cfg)
         self._strip_results = bool(strip_results)
         self._raise_on_timeout = not bool(auto_restart_on_timeout)
         self._pwsh_mem_init = False
@@ -277,7 +223,7 @@ class Shell:
         """Stop the backend process.
 
         `force=True` requests an immediate termination (backend-specific semantics).
-        Always safe to call; errors are wrapped in `SmartShellError`.
+        Always safe to call; errors are wrapped in `VirtualShellError`.
         """
         try:
             self._core.stop(force)
@@ -409,7 +355,7 @@ class Shell:
         if isinstance(args, dict) and args is not None:
             # Named args path.
             named_args = dict(args)
-            res: _CPP_ExecResult = self._core.execute_script_kv(
+            res: ExecutionResult = self._core.execute_script_kv(
                 script_path=str(Path(script_path).resolve()),
                 named_args=named_args,
                 timeout_seconds=to,
@@ -420,7 +366,7 @@ class Shell:
 
             return _strip_result_fields(res) if self._strip_results else res
         
-        res: _CPP_ExecResult = self._core.execute_script(
+        res = self._core.execute_script(
             script_path=str(Path(script_path).resolve()),
             args=list(args or []) ,
             timeout_seconds=to,
@@ -502,7 +448,7 @@ class Shell:
             raise_on_error=raise_on_error,
         )
     
-    def make_proxy(self, type_name: str, obj_ref: str = "$obj") -> Any:
+    def make_proxy(self, type_name: str, obj_ref: str = "$obj") -> PsProxyLike:
         return self._core.make_proxy(type_name, obj_ref, 2)
 
     def generate_psobject(self, command: str, output_path: Path) -> None:
@@ -517,7 +463,7 @@ class Shell:
             here we only quote the literal; you still provide the full command.
         """
         res = self.run(quote_pwsh_literal(s), timeout=timeout, raise_on_error=raise_on_error)
-        return cast(_CPP_ExecResult, res)
+        return cast(ExecutionResult, res)
 
     def __enter__(self) -> "Shell":
         """Context manager entry: ensure backend is running."""
