@@ -196,6 +196,9 @@ class Shell:
         """Return the absolute path to the session snapshot XML file."""
         return self._session_path
 
+    def get_module(self) -> VirtualShell:
+        return self._core.get_shared_ptr()
+
     def set_strip_results(self, v: bool) -> None:
         """Set whether to strip leading/trailing whitespace from `out` and `err`.
 
