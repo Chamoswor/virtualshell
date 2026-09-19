@@ -39,7 +39,6 @@ set(SRC
   cpp/src/io_pump.cpp
   cpp/src/powershell_process.cpp
   cpp/src/virtual_shell.cpp
-  cpp/src/py_proxy.cpp
 )
 
 file(GLOB_RECURSE VS_HEADERS CONFIGURE_DEPENDS

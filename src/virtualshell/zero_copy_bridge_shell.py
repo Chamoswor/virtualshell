@@ -397,11 +397,13 @@ class ZeroCopyBridge:
         *,
         timeout: float = 30.0,
         return_memoryview: bool = False,
+        depth: int = 1,
     ) -> Union[bytes, memoryview]:
         """Transfer a PowerShell variable's bytes to Python.
 
         byte[] variables are sent as-is; any other value is serialized to
         CliXml by the PowerShell side first (parse with PSObject.from_bytes).
+        `depth` controls PSSerializer nesting for the non-byte[] case.
         """
         channel = self._require_channel()
         var_name = variable.lstrip("$")
@@ -412,7 +414,8 @@ class ZeroCopyBridge:
         chunk_mb = max(1, self.default_chunk_bytes // (1024 * 1024))
         future = self._track_future(self.shell.run_async(
             f"Send-VariableToPython -Variable ${var_name} "
-            f"-ChunkSizeMB {chunk_mb} -TimeoutSeconds {int(timeout)}",
+            f"-ChunkSizeMB {chunk_mb} -TimeoutSeconds {int(timeout)} "
+            f"-Depth {int(depth)}",
             timeout=timeout,
         ))
 

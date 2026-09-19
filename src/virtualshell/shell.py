@@ -12,7 +12,7 @@ import tempfile
 import time
 import concurrent.futures as cf
 from pathlib import Path
-from typing import Iterable, List, Dict, Optional, Callable, Any, Union, cast, overload, Sequence
+from typing import Iterable, List, Dict, Optional, Callable, Any, Union, cast, overload, Sequence, TYPE_CHECKING
 from concurrent.futures import Future
 from .generate_psobject import generate
 from . import _module
@@ -181,6 +181,7 @@ class Shell:
 
         self._cfg: Config = cfg
         self._core: VirtualShell = mod.VirtualShell(cfg)
+        self._zcb: Any = None
         self._strip_results = bool(strip_results)
         self._raise_on_timeout = not bool(auto_restart_on_timeout)
         self._pwsh_mem_init = False
@@ -230,6 +231,12 @@ class Shell:
         `force=True` requests an immediate termination (backend-specific semantics).
         Always safe to call; errors are wrapped in `VirtualShellError`.
         """
+        if self._zcb is not None:
+            try:
+                self._zcb.close()
+            except Exception:
+                pass
+            self._zcb = None
         try:
             self._core.stop(force)
         except Exception as e:  # Surface backend failures in a consistent type.
@@ -452,9 +459,33 @@ class Shell:
             dot_source=False,
             raise_on_error=raise_on_error,
         )
+
     
+    if TYPE_CHECKING:
+        from .zero_copy_bridge_shell import ZeroCopyBridge
+        def zero_copy_bridge(self, frame_mb: int = 16, chunk_mb: int = 4) -> ZeroCopyBridge:
+            """Return this shell's shared ZeroCopyBridge, creating it on first use.
+
+            The PowerShell side holds a single channel per session, so all users
+            of a Shell must share one bridge. It is closed automatically by
+            `stop()`.
+            """
+            ...
+    else:
+        def zero_copy_bridge(self, frame_mb: int = 16, chunk_mb: int = 4) -> Any:
+            if self._zcb is None or getattr(self._zcb, "_channel", None) is None:
+                from .zero_copy_bridge_shell import ZeroCopyBridge
+                self._zcb = ZeroCopyBridge(self, frame_mb=frame_mb, chunk_mb=chunk_mb)
+            return self._zcb
+
     def make_proxy(self, type_name: str, obj_ref: str = "$obj") -> PsProxyLike:
-        return self._core.make_proxy(type_name, obj_ref, 2)
+        """Create a live proxy for a PowerShell object.
+
+        `obj_ref` may be an existing variable ("$obj"), or a creation
+        expression such as "System.Text.StringBuilder(32)".
+        """
+        from .ps_proxy import PsProxy
+        return PsProxy(self, type_name, obj_ref)
 
     def generate_psobject(self, command: str, output_path: Path) -> None:
         """Generate a PowerShell object from a command."""

@@ -5,7 +5,6 @@
 #include <memory>
 #include "../include/virtual_shell.hpp"
 #include "../include/py_bridge.hpp"
-#include "../include/py_proxy.hpp"
 
 namespace py = pybind11;
 
@@ -236,38 +235,12 @@ PYBIND11_MODULE(_core, m) {
 
         .def("is_restarting", &VirtualShell::isRestarting)
         .def("get_shared_ptr", &VirtualShell::getSharedPtr)
-        .def("make_proxy",
-             [](VirtualShell& shell,
-                const std::string& type_name,
-                const std::string& object_ref,
-                int depth) {
-                 return virtualshell::pybridge::make_ps_proxy(
-                     shell,
-                     std::string(type_name),
-                     std::string(object_ref), 
-                     depth);
-             },
-             py::arg("type_name"),
-             py::arg("object_ref") = std::string("$obj"),
-             py::arg("depth") = 4,
-             "Create a native PowerShell proxy bound to this shell")
 
         .def("__repr__", [](const VirtualShell& shell) {
             return std::string("<VirtualShell running=") + (shell.isAlive() ? "1" : "0") + ">";
         })
         .def("__enter__", [](VirtualShell& shell) -> VirtualShell& { shell.start(); return shell; })
         .def("__exit__",  [](VirtualShell& shell, py::object, py::object, py::object) { shell.stop(); });
-
-    py::class_<virtualshell::pybridge::PsProxy, std::shared_ptr<virtualshell::pybridge::PsProxy>>(m, "PsProxy")
-        .def("__getattr__", &virtualshell::pybridge::PsProxy::getattr)
-        .def("__setattr__", &virtualshell::pybridge::PsProxy::setattr)
-        .def("__dir__", &virtualshell::pybridge::PsProxy::dir)
-        .def("proxy_schema", &virtualshell::pybridge::PsProxy::schema)
-        .def("proxy_multi_call", &virtualshell::pybridge::PsProxy::multi_call)
-        .def_property_readonly("type_name", &virtualshell::pybridge::PsProxy::type_name)
-        .def("__repr__", [](const virtualshell::pybridge::PsProxy& proxy) {
-            return std::string("<PsProxy type='") + proxy.type_name() + "'>";
-        });
 
     // Utility
     m.def("create_config", []() { return VirtualShell::Config{}; }, "Create a new Config object with default values");

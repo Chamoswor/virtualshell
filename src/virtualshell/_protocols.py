@@ -121,7 +121,7 @@ class VirtualShellLike(Protocol):
         timeout_seconds: float = 0.0, 
         dot_source: bool = False, 
         raise_on_error: bool = False
-    ) -> Any:
+    ) -> ExecutionResultLike:
         ...
 
     def execute_script_kv(
@@ -131,7 +131,7 @@ class VirtualShellLike(Protocol):
         timeout_seconds: float = 0.0, 
         dot_source: bool = False, 
         raise_on_error: bool = False
-    ) -> Any:
+    ) -> ExecutionResultLike:
         ...
 
     # ---------------------------------------------------------
@@ -142,7 +142,7 @@ class VirtualShellLike(Protocol):
         command: str, 
         callback: Callable[..., Any] | None = None, 
         timeout_seconds: float = 0.0
-    ) -> Future[Any]:
+    ) -> Future[ExecutionResultLike]:
         ...
 
     def execute_async_batch(
@@ -151,7 +151,7 @@ class VirtualShellLike(Protocol):
         progress_callback: Callable[..., Any] | None = None, 
         stop_on_first_error: bool = True, 
         per_command_timeout_seconds: float = 0.0
-    ) -> Future[List[Any]]:
+    ) -> Future[List[ExecutionResultLike]]:
         ...
 
     def execute_async_script(
@@ -162,7 +162,7 @@ class VirtualShellLike(Protocol):
         timeout_seconds: float = 0.0, 
         dot_source: bool = False, 
         raise_on_error: bool = False
-    ) -> Future[Any]:
+    ) -> Future[ExecutionResultLike]:
         ...
 
     def execute_async_script_kv(
@@ -172,7 +172,7 @@ class VirtualShellLike(Protocol):
         timeout_seconds: float = 0.0, 
         dot_source: bool = False, 
         raise_on_error: bool = False
-    ) -> Future[Any]:
+    ) -> Future[ExecutionResultLike]:
         ...
 
     # ---------------------------------------------------------
@@ -222,14 +222,6 @@ class VirtualShellLike(Protocol):
 
     def get_shared_ptr(self) -> Self:
             ...
-
-    def make_proxy(
-        self, 
-        type_name: str, 
-        object_ref: str = "$obj", 
-        depth: int = 4
-    ) -> PsProxyLike:
-        ...
 
     # ---------------------------------------------------------
     # Context Manager

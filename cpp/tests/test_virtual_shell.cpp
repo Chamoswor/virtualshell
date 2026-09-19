@@ -181,6 +181,84 @@ TEST_CASE("timeout with auto-restart recovers and accepts new work") {
     shell->stop(true);
 }
 
+// ---- Paths the Python proxy layer (ps_proxy.py) depends on ----
+
+TEST_CASE("large output survives the pipe pump intact") {
+    auto shell = start_shell(test_config());
+    // 300 KB on a single line: crosses several read-chunk boundaries.
+    auto res = shell->execute("'ab' * 150000");
+    CHECK(res.success);
+    std::string payload = res.out;
+    while (!payload.empty() && (payload.back() == '\n' || payload.back() == '\r'))
+        payload.pop_back();
+    CHECK_EQ(payload.size(), static_cast<size_t>(300000));
+    CHECK(payload.find_first_not_of("ab") == std::string::npos);
+
+    // The next command must not see any residue of the previous payload.
+    auto marker = shell->execute("Write-Output 'marker-after-large'");
+    CHECK(marker.success);
+    CHECK(contains(marker.out, "marker-after-large"));
+    CHECK(!contains(marker.out, "ababab"));
+    shell->stop();
+}
+
+TEST_CASE("multi-line script blocks execute as one command") {
+    auto shell = start_shell(test_config());
+    std::string script =
+        "$__t_list = @()\n"
+        "foreach ($i in 1..3) {\n"
+        "  if ($i -gt 1) { $__t_list += ,($i * 10) }\n"
+        "}\n"
+        "[pscustomobject]@{ total = ($__t_list | Measure-Object -Sum).Sum } | ConvertTo-Json -Compress";
+    auto res = shell->execute(script);
+    CHECK(res.success);
+    CHECK(contains(res.out, "\"total\":50"));
+
+    // Variables defined in one execute persist into the next.
+    auto next = shell->execute("$__t_list.Count");
+    CHECK(next.success);
+    CHECK(contains(next.out, "2"));
+    shell->stop();
+}
+
+TEST_CASE("ps_quote round-trips interpolation-hostile strings") {
+    auto shell = start_shell(test_config());
+    const std::string hostile = "a'b `n $env:PATH \"quoted\" ; & | %";
+    auto res = shell->execute(
+        "Write-Output " + virtualshell::helpers::parsers::ps_quote(hostile));
+    CHECK(res.success);
+    CHECK(contains(res.out, hostile));
+    shell->stop();
+}
+
+TEST_CASE("success reflects only the final statement of a packet") {
+    // The proxy layer sends an assignment and reads $?-based success for it,
+    // then follows up with a reader command. This contract requires that a
+    // packet's success mirrors its LAST statement.
+    auto shell = start_shell(test_config());
+
+    auto res = shell->execute(
+        "Get-Item 'C:/definitely/not/here.xyz' -ErrorAction SilentlyContinue\n"
+        "Write-Output 'still-ok'");
+    CHECK(res.success);   // final statement succeeded
+    CHECK(contains(res.out, "still-ok"));
+
+    auto fail = shell->execute("Write-Output 'x'\nGet-Item 'C:/definitely/not/here.xyz'");
+    CHECK(!fail.success); // final statement failed
+    shell->stop();
+}
+
+TEST_CASE("json emitted by ConvertTo-Json arrives unmangled") {
+    auto shell = start_shell(test_config());
+    auto res = shell->execute(
+        "@{ s = 'x''y\"z'; i = 42; f = 1.5; b = $true; u = '\xC3\xA6\xC3\xB8\xC3\xA5' } | ConvertTo-Json -Compress");
+    CHECK(res.success);
+    CHECK(contains(res.out, "\"i\":42"));
+    CHECK(contains(res.out, "\"b\":true"));
+    CHECK(contains(res.out, "\xC3\xA6\xC3\xB8\xC3\xA5"));
+    shell->stop();
+}
+
 TEST_CASE("updateConfig is rejected while running and applied when stopped") {
     auto shell = start_shell(test_config());
     auto cfg = shell->getConfig();

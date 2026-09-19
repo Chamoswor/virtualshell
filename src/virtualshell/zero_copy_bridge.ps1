@@ -218,7 +218,8 @@ function Send-VariableToPython {
         [object]$Variable,
 
         [int]$ChunkSizeMB = 4,
-        [int]$TimeoutSeconds = 30
+        [int]$TimeoutSeconds = 30,
+        [int]$Depth = 1
     )
 
     if (-not $global:__VsZcbChannel) {
@@ -228,7 +229,7 @@ function Send-VariableToPython {
     if ($Variable -is [byte[]]) {
         $bytes = [byte[]]$Variable
     } else {
-        $xml = [System.Management.Automation.PSSerializer]::Serialize($Variable)
+        $xml = [System.Management.Automation.PSSerializer]::Serialize($Variable, $Depth)
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($xml)
     }
 
