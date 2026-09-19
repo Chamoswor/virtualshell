@@ -93,38 +93,6 @@ install(TARGETS _core
   ARCHIVE DESTINATION virtualshell
 )
 
-# Build and link the vs_shm library on Windows
-if(WIN32 AND MSVC)
-  add_subdirectory(cpp/lib/vs_shm)
-
-  set_target_properties(_vs_shm PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY                "${_VS_OUTDIR}"
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE        "${_VS_OUTDIR}"
-    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${_VS_OUTDIR}"
-    RUNTIME_OUTPUT_DIRECTORY_DEBUG          "${_VS_OUTDIR}"
-    LIBRARY_OUTPUT_DIRECTORY                "${_VS_OUTDIR}"
-    LIBRARY_OUTPUT_DIRECTORY_RELEASE        "${_VS_OUTDIR}"
-    LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${_VS_OUTDIR}"
-    LIBRARY_OUTPUT_DIRECTORY_DEBUG          "${_VS_OUTDIR}"
-  )
-
-  add_dependencies(_core _vs_shm)
-
-  add_custom_command(TARGET _core POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${_VS_OUTDIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:_vs_shm>"
-            "${_VS_OUTDIR}/$<TARGET_FILE_NAME:_vs_shm>"
-    VERBATIM
-  )
-
-  install(TARGETS _vs_shm
-    RUNTIME DESTINATION virtualshell
-    LIBRARY DESTINATION virtualshell
-    ARCHIVE DESTINATION virtualshell
-  )
-endif()
-
 # C++ tests (opt-in; never built by pip/scikit-build)
 option(VIRTUALSHELL_BUILD_TESTS "Build the C++ test suite (vs_core_tests)" OFF)
 if(VIRTUALSHELL_BUILD_TESTS)

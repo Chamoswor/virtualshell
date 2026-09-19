@@ -1,7 +1,6 @@
 from __future__ import annotations
 from importlib import import_module
 from typing import TYPE_CHECKING
-import platform
 
 if TYPE_CHECKING:
     from .shell import ExecutionResult, BatchProgress, Shell, ExitCode
@@ -12,8 +11,6 @@ try:
 except Exception:
     __version__ = "0.0.0"
 
-from . import _globals as _g
-
 from .errors import (
     VirtualShellError,
     PowerShellNotFoundError,
@@ -21,19 +18,12 @@ from .errors import (
     ExecutionError,
 )
 
-if platform.system() == 'Windows':
-    __all__ = [
-        "VirtualShellError", "PowerShellNotFoundError",
-        "ExecutionTimeoutError", "ExecutionError",
-        "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode",
-        "ZeroCopyBridge", "PSObject",
-    ]
-else:
-    __all__ = [
-        "VirtualShellError", "PowerShellNotFoundError",
-        "ExecutionTimeoutError", "ExecutionError",
-        "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode"
-    ]
+__all__ = [
+    "VirtualShellError", "PowerShellNotFoundError",
+    "ExecutionTimeoutError", "ExecutionError",
+    "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode",
+    "ZeroCopyBridge", "PSObject",
+]
 
 # Lazy loading of submodules and attributes to avoid importing compiled extension at package import time
 def __getattr__(name: str):
@@ -42,15 +32,12 @@ def __getattr__(name: str):
         obj = getattr(mod, name)
         globals()[name] = obj
         return obj
-    if  name in {"ZeroCopyBridge", "PSObject"}:
-        if platform.system() == 'Windows':
-            mod = import_module(".zero_copy_bridge_shell", __name__)
-            obj = getattr(mod, name)
-            globals()[name] = obj
-            return obj
-        else:
-            raise ImportError(f"{name} is only available on Windows platforms.")
-    
+    if name in {"ZeroCopyBridge", "PSObject"}:
+        mod = import_module(".zero_copy_bridge_shell", __name__)
+        obj = getattr(mod, name)
+        globals()[name] = obj
+        return obj
+
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 def __dir__():
