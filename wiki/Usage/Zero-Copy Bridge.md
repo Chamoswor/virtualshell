@@ -1,6 +1,6 @@
 # Zero-Copy Bridge
 
-The Zero-Copy Bridge provides high-performance data transfer between Python and PowerShell using shared memory. This feature is **Windows-only** and requires the native `win_pwsh.dll`.
+The Zero-Copy Bridge provides high-performance data transfer between Python and PowerShell using shared memory. It is **cross-platform** (Windows, Linux, macOS): the payload moves through a file-backed memory map shared between Python (`mmap`) and PowerShell (.NET `MemoryMappedFile`), so no native DLL is required.
 
 ## Overview
 
@@ -599,7 +599,6 @@ except Exception as e:
 
 ## Limitations
 
-- **Windows only** - Requires `win_pwsh.dll`
 - **Same machine** - Cannot transfer between remote machines
 - **Memory constraints** - Frame size limits maximum transfer size
 - **Serialization limits** - Some PowerShell types cannot be serialized (COM objects, FileStreams, PSCredentials, etc.)

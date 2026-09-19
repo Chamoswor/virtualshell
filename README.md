@@ -22,7 +22,7 @@ Instead of spawning `pwsh` for every command, you get:
 * **~2–4 ms execution latency**
 * **async + batch execution**
 * **structured, predictable results**
-* optional **zero-copy shared memory** (Windows)
+* optional **zero-copy shared memory** (cross-platform)
 
 Perfect for:
 
@@ -160,11 +160,14 @@ All execution APIs support:
 
 ## 🧠 Advanced features
 
-### 🔌 Zero-Copy Bridge (Windows only)
+### 🔌 Zero-Copy Bridge (cross-platform)
 
 > High-throughput shared-memory transfer between Python and PowerShell
 
 Ideal for large binary blobs, files, or high-frequency data exchange.
+Uses a file-backed memory map shared between Python (`mmap`) and
+PowerShell (.NET `MemoryMappedFile`) — no native DLL required, works on
+Windows, Linux and macOS.
 
 ```python
 from virtualshell import Shell, ZeroCopyBridge
