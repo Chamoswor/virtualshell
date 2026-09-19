@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 _CORE_MODULE_NAME = f"{__package__}._core"
 
 try:
-    # Vi ignorerer typen her ved runtime, siden vi fikser det under
     core = importlib.import_module(_CORE_MODULE_NAME)
 except Exception as e:
     raise ImportError(
