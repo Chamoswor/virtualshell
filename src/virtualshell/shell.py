@@ -197,6 +197,14 @@ class Shell:
         """Return the absolute path to the session snapshot XML file."""
         return self._session_path
 
+    #--------- C++ module access ---------
+    def get_config(self) -> Config:
+        return self._cfg
+
+    def update_config(self, cfg: Config) -> None:
+        self._cfg = cfg
+        self._core.update_config(cfg)
+    
     def get_module(self) -> VirtualShell:
         return self._core.get_shared_ptr()
 

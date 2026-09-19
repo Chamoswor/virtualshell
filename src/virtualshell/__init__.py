@@ -3,7 +3,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .shell import ExecutionResult, BatchProgress, Shell, ExitCode
+    from .shell import ExecutionResult, BatchProgress, Shell, ExitCode, Config
     from .zero_copy_bridge_shell import ZeroCopyBridge, PSObject
 
 try:
@@ -21,13 +21,13 @@ from .errors import (
 __all__ = [
     "VirtualShellError", "PowerShellNotFoundError",
     "ExecutionTimeoutError", "ExecutionError",
-    "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode",
+    "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode", "Config",
     "ZeroCopyBridge", "PSObject",
 ]
 
 # Lazy loading of submodules and attributes to avoid importing compiled extension at package import time
 def __getattr__(name: str):
-    if name in {"Shell", "ExecutionResult", "BatchProgress", "ExitCode"}:
+    if name in {"Shell", "ExecutionResult", "BatchProgress", "ExitCode", "Config"}:
         mod = import_module(".shell", __name__)
         obj = getattr(mod, name)
         globals()[name] = obj
