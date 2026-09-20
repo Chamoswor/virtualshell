@@ -169,6 +169,15 @@ with Shell() as sh:
     writer.Close()
 ```
 
+A bare `[Type]` literal binds the type itself, exposing its **static**
+methods, properties and constants:
+
+```python
+with Shell() as sh:
+    math = sh.make_proxy("", "[System.Math]")
+    print(math.Sqrt(16.0), math.PI)     # 4.0 3.141592653589793
+```
+
 Pair proxies with `generate_psobject`, which produces typed `Protocol` stubs
 (including overloads) for IDE completion and static analysis:
 

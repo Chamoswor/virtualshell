@@ -7,6 +7,7 @@ import shutil
 import pytest
 
 from virtualshell.generate_psobject import (
+    _property_type,
     build_method_signatures,
     categorize_members,
     first_signature,
@@ -253,6 +254,38 @@ class TestRenderProtocol:
     def test_no_metadata_classvars_by_default(self):
         source = render_protocol("MyProxy", self.MEMBERS)
         assert "__ps_type_name__" not in source
+        assert "__ps_static__" not in source
+
+
+class TestStaticRendering:
+    # Shaped like `[System.Math] | Get-Member -Static | ConvertTo-Json`.
+    MEMBERS = [
+        {"Name": "PI", "MemberType": 4,
+         "Definition": "static double PI {get;}"},
+        {"Name": "Sqrt", "MemberType": 64,
+         "Definition": "static double Sqrt(double d)"},
+    ]
+
+    def test_static_property_type_strips_prefix(self):
+        assert _property_type(
+            {"Definition": "static datetime Now {get;}"}) == "datetime"
+        # Instance definitions are unaffected.
+        assert _property_type({"Definition": "int Year {get;}"}) == "int"
+
+    def test_ps_static_classvar_embedded(self):
+        source = render_protocol(
+            "Math", self.MEMBERS,
+            ps_type_name="System.Math", ps_expression="[System.Math]",
+            ps_static=True)
+        compile(source, "<generated>", "exec")
+        assert "__ps_static__: ClassVar[bool] = True" in source
+        assert "__ps_expression__: ClassVar[str] = '[System.Math]'" in source
+
+    def test_static_members_render_with_real_types(self):
+        source = render_protocol("Math", self.MEMBERS, ps_static=True)
+        compile(source, "<generated>", "exec")
+        assert "def PI(self) -> float: ..." in source
+        assert "def Sqrt(self, d: float) -> float: ..." in source
 
 
 # =============================================================================
@@ -367,3 +400,37 @@ class TestGenerateEndToEnd:
         bound = shell.make_proxy(StringBuilder, "$vs_gen_bind")
         bound.Append("bundet")
         assert shell.run("$vs_gen_bind.ToString()").out.strip() == "bundet"
+
+    def test_generate_static_type(self, shell, tmp_path):
+        from virtualshell.generate_psobject import generate
+
+        out_file = tmp_path / "math_static.py"
+        generate(shell, "[System.Math]", out_file)
+        source = out_file.read_text(encoding="utf-8")
+
+        compile(source, str(out_file), "exec")
+        assert "class Math(Protocol):" in source
+        assert "__ps_static__: ClassVar[bool] = True" in source
+        assert "__ps_expression__: ClassVar[str] = '[System.Math]'" in source
+        assert "def Sqrt(self" in source
+        assert "def PI(self) -> float: ..." in source
+
+    def test_make_proxy_from_generated_static_protocol(self, shell, tmp_path):
+        """generate -> import -> make_proxy(StaticProtocol) round trip."""
+        import importlib.util
+
+        from virtualshell.generate_psobject import generate
+
+        out_file = tmp_path / "math_protocol.py"
+        generate(shell, "[System.Math]", out_file)
+
+        spec = importlib.util.spec_from_file_location("math_protocol", out_file)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        Math = module.Math
+
+        assert Math.__ps_static__ is True
+
+        m = shell.make_proxy(Math)
+        assert m.Sqrt(16.0) == 4.0
+        assert abs(m.PI - 3.141592653589793) < 1e-12

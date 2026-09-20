@@ -7,14 +7,15 @@ The proxy is implemented in pure Python and works on Windows, Linux and macOS. B
 ## Signature
 
 ```python
-proxy = shell.make_proxy(type_name: str, obj_ref: str | None = None)
-proxy = shell.make_proxy(GeneratedProtocol, obj_ref: str | None = None)
+proxy = shell.make_proxy(type_name: str, obj_ref: str | None = None, *, static: bool = False)
+proxy = shell.make_proxy(GeneratedProtocol, obj_ref: str | None = None, *, static: bool = False)
 ```
 
 | Parameter | Description |
 |-----------|-------------|
 | `type_name` | Optional label (`""` is fine — the real type is resolved from the live object), **or** a Protocol class produced by `generate_psobject`. |
-| `obj_ref` | Either an existing PowerShell variable (`"$client"`), or a **creation expression** such as `"System.Text.StringBuilder(32)"`. Creation tries `[Type]::new(...)`, `New-Object`, and COM instantiation in order. |
+| `obj_ref` | Either an existing PowerShell variable (`"$client"`), or a **creation expression** such as `"System.Text.StringBuilder(32)"`. Creation tries `[Type]::new(...)`, `New-Object`, and COM instantiation in order. A bare type literal (`"[System.IO.Path]"`) selects [static mode](#static-classes). |
+| `static` | Force static mode for an unbracketed type name or a `$variable` that holds a type object. |
 
 With a generated Protocol class as the first argument, the object is created
 from the metadata embedded in the class, and the return value is typed as the
@@ -48,6 +49,45 @@ with Shell() as sh:
     sh.run("$client = [System.Net.WebClient]::new()")
     client = sh.make_proxy("", "$client")
 ```
+
+## Static Classes
+
+A bare `[Type]` literal binds the *type itself* instead of creating an
+instance. The proxy then exposes the type's **static** methods, properties
+and constants (invoked with `::` in the session):
+
+```python
+with Shell() as sh:
+    math = sh.make_proxy("", "[System.Math]")
+    math.Sqrt(16.0)                     # 4.0
+    math.PI                             # 3.141592653589793 (const field)
+
+    path = sh.make_proxy("", "[System.IO.Path]")
+    path.Combine("a", "b")              # "a\\b"
+
+    dow = sh.make_proxy("", "[System.DayOfWeek]")
+    dow.Monday                          # "Monday" (enum values are fields)
+```
+
+The motivating example — a WinForms message box:
+
+```python
+with Shell(initial_commands=["Add-Type -AssemblyName System.Windows.Forms"]) as sh:
+    msg_box = sh.make_proxy("", "[System.Windows.Forms.MessageBox]")
+    msg_box.Show("Hello from Python!", "Title")   # blocks until dismissed
+```
+
+Notes:
+
+- Return values convert exactly like instance calls (the table below):
+  scalars inline, `byte[]` via the bridge, complex values as sub-proxies.
+- Writable static properties can be assigned; consts and `readonly` fields
+  are read-only and raise `AttributeError` on assignment.
+- Instance members are **not** available on a static proxy (and vice
+  versa); the same type can have one proxy of each kind.
+- `static=True` forces static mode when the name is unbracketed
+  (`make_proxy("", "System.Math", static=True)`) or when binding a
+  `$variable` that already holds a type object.
 
 ## Value Conversion
 

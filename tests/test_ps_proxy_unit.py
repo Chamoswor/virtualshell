@@ -14,8 +14,11 @@ from virtualshell.ps_proxy import (
     _parse_iso_datetime,
     _parse_schema,
     _ps_quote,
+    _static_member_expr,
+    _static_method_call_expr,
     build_creation_strategies,
     split_invocation,
+    static_type_literal,
 )
 
 
@@ -47,6 +50,56 @@ class TestExpressions:
     def test_call_with_special_name(self):
         expr = _method_call_expr("$x", "my method", ["1", "2"])
         assert expr == "$x.PSObject.Methods['my method'].Invoke(1, 2)"
+
+
+class TestStaticExpressions:
+    def test_static_member(self):
+        assert _static_member_expr("$t", "PI") == "$t::PI"
+
+    def test_static_member_with_special_name_uses_reflection(self):
+        expr = _static_member_expr("$t", "weird name")
+        assert "InvokeMember('weird name'" in expr
+        assert "GetProperty,GetField" in expr
+
+    def test_static_call(self):
+        assert _static_method_call_expr("$t", "Sqrt", ["16"]) == "$t::Sqrt(16)"
+
+    def test_static_call_with_special_name_uses_reflection(self):
+        expr = _static_method_call_expr("$t", "my method", ["1", "2"])
+        assert "InvokeMember('my method'" in expr
+        assert "InvokeMethod" in expr
+        assert "@(1, 2)" in expr
+
+
+class TestStaticTypeLiteral:
+    def test_bare_literal(self):
+        assert static_type_literal("[System.Math]") == "System.Math"
+
+    def test_whitespace_tolerated(self):
+        assert static_type_literal("  [System.IO.Path] ") == "System.IO.Path"
+
+    def test_generic_literal(self):
+        assert (static_type_literal("[System.Collections.Generic.List[int]]")
+                == "System.Collections.Generic.List[int]")
+
+    def test_plain_type_name_is_not_a_literal(self):
+        assert static_type_literal("System.Math") is None
+
+    def test_invocation_is_not_a_literal(self):
+        assert static_type_literal("[System.Text.StringBuilder]::new(3)") is None
+
+    def test_cast_is_not_a_literal(self):
+        assert static_type_literal("[int](3)") is None
+
+    def test_variable_is_not_a_literal(self):
+        assert static_type_literal("$var") is None
+
+    def test_unbalanced_brackets_rejected(self):
+        assert static_type_literal("[int][string]") is None
+
+    def test_empty_and_tiny_inputs(self):
+        assert static_type_literal("") is None
+        assert static_type_literal("[]") is None
 
 
 class TestSplitInvocation:

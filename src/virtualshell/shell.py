@@ -492,12 +492,15 @@ class Shell:
             return self._zcb
 
     @overload
-    def make_proxy(self, type_name: str, obj_ref: Optional[str] = None) -> "PsProxy": ...
+    def make_proxy(self, type_name: str, obj_ref: Optional[str] = None,
+                   *, static: bool = False) -> "PsProxy": ...
 
     @overload
-    def make_proxy(self, type_name: Type[_ProxyProtocol], obj_ref: Optional[str] = None) -> _ProxyProtocol: ...
+    def make_proxy(self, type_name: Type[_ProxyProtocol], obj_ref: Optional[str] = None,
+                   *, static: bool = False) -> _ProxyProtocol: ...
 
-    def make_proxy(self, type_name: Union[str, Type[Any]], obj_ref: Optional[str] = None) -> Any:
+    def make_proxy(self, type_name: Union[str, Type[Any]], obj_ref: Optional[str] = None,
+                   *, static: bool = False) -> Any:
         """Create a live proxy for a PowerShell object.
 
         Two call forms:
@@ -509,6 +512,11 @@ class Shell:
           recreates the object, and the return value is typed as the protocol
           so no annotation is needed. Pass `obj_ref` (e.g. "$existing") to
           bind an existing variable instead of creating a new object.
+
+        A bare type literal such as ``make_proxy("", "[System.IO.Path]")``
+        yields a *static* proxy exposing the type's static methods,
+        properties and constants. `static=True` forces static mode for an
+        unbracketed type name or a ``$variable`` that holds a type object.
         """
         from .ps_proxy import PsProxy
 
@@ -520,9 +528,12 @@ class Shell:
                 raise TypeError(
                     f"{proto.__name__} carries no __ps_type_name__/__ps_expression__ "
                     "metadata; regenerate it with generate_psobject")
-            return PsProxy(self, ps_type, obj_ref if obj_ref is not None else expression)
+            is_static = static or bool(getattr(proto, "__ps_static__", False))
+            return PsProxy(self, ps_type, obj_ref if obj_ref is not None else expression,
+                           static=is_static)
 
-        return PsProxy(self, type_name, obj_ref if obj_ref is not None else "$obj")
+        return PsProxy(self, type_name, obj_ref if obj_ref is not None else "$obj",
+                       static=static)
 
     def generate_psobject(self, command: str, output_path: Path) -> None:
         """Generate a PowerShell object from a command."""

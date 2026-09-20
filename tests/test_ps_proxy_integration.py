@@ -305,3 +305,93 @@ class TestMultiCall:
         al = shell.make_proxy("", "System.Collections.ArrayList")
         with pytest.raises(TypeError):
             al.proxy_multi_call(len, 3)
+
+
+class TestStaticProxies:
+    def test_type_literal_selects_static_mode(self, shell):
+        m = shell.make_proxy("", "[System.Math]")
+        assert m.type_name == "System.Math"
+        assert "static" in repr(m)
+        assert m.Sqrt(16.0) == 4.0
+        assert m.Max(3, 7) == 7
+
+    def test_constant_field_reads_as_property(self, shell):
+        m = shell.make_proxy("", "[System.Math]")
+        assert abs(m.PI - 3.141592653589793) < 1e-12
+
+    def test_static_method_with_string_args(self, shell):
+        p = shell.make_proxy("", "[System.IO.Path]")
+        assert p.Combine("a", "b") in ("a\\b", "a/b")
+
+    def test_static_datetime_roundtrip(self, shell):
+        from datetime import datetime
+
+        dt = shell.make_proxy("", "[datetime]")
+        parsed = dt.Parse("2024-01-02T03:04:05")
+        assert parsed == datetime(2024, 1, 2, 3, 4, 5)
+
+    def test_enum_values_read_as_strings(self, shell):
+        dow = shell.make_proxy("", "[System.DayOfWeek]")
+        assert dow.Monday == "Monday"
+
+    def test_writable_static_property_and_const(self, shell):
+        shell.run(
+            "Add-Type -TypeDefinition 'public static class VsStaticTest { "
+            "public static int Counter { get; set; } "
+            "public static string Echo(string s) { return s + \"!\"; } "
+            "public const double Ratio = 2.5; }'",
+            raise_on_error=True)
+        t = shell.make_proxy("", "[VsStaticTest]")
+        t.Counter = 5
+        assert t.Counter == 5
+        assert t.Echo("hei") == "hei!"
+        assert t.Ratio == 2.5
+        with pytest.raises(AttributeError, match="read-only"):
+            t.Ratio = 3.0
+
+    def test_static_true_with_unbracketed_name(self, shell):
+        m = shell.make_proxy("", "System.Math", static=True)
+        assert m.Sqrt(9.0) == 3.0
+
+    def test_static_true_binds_existing_type_variable(self, shell):
+        shell.run("$vs_static_t = [System.Math]", raise_on_error=True)
+        m = shell.make_proxy("", "$vs_static_t", static=True)
+        assert m.Sqrt(25.0) == 5.0
+
+    def test_static_true_rejects_non_type_variable(self, shell):
+        shell.run("$vs_not_a_type = 42", raise_on_error=True)
+        with pytest.raises(ValueError, match="does not hold"):
+            shell.make_proxy("", "$vs_not_a_type", static=True)
+
+    def test_unknown_static_type_raises(self, shell):
+        with pytest.raises(RuntimeError, match="Failed to resolve static type"):
+            shell.make_proxy("", "[No.Such.Type.Exists]")
+
+    def test_instance_members_absent_from_static_schema(self, shell):
+        m = shell.make_proxy("", "[System.Text.StringBuilder]")
+        names = {x["Name"] for x in m.proxy_schema()["Methods"]}
+        # ToString is an instance method; a static proxy must not offer it.
+        assert "ToString" not in names
+
+    def test_static_and_instance_schemas_coexist(self, shell):
+        from virtualshell.ps_proxy import _SCHEMA_CACHE
+        shell.make_proxy("", "[System.Text.StringBuilder]")
+        shell.make_proxy("", "System.Text.StringBuilder")
+        run_id = shell.python_run_id
+        assert (run_id, "System.Text.StringBuilder") in _SCHEMA_CACHE
+        assert (run_id, "static:System.Text.StringBuilder") in _SCHEMA_CACHE
+
+    def test_static_multi_call(self, shell):
+        m = shell.make_proxy("", "[System.Math]")
+        assert m.proxy_multi_call(m.Sqrt, [4.0, 9.0, 16.0]) == [2.0, 3.0, 4.0]
+
+    def test_messagebox_scenario_schema(self, shell):
+        """The motivating case: a WinForms MessageBox static proxy exposes
+        Show without being called (calling it would block on a modal)."""
+        res = shell.run("Add-Type -AssemblyName System.Windows.Forms")
+        if not res.success:
+            pytest.skip("System.Windows.Forms not available")
+        mb = shell.make_proxy("", "[System.Windows.Forms.MessageBox]")
+        assert mb.type_name == "System.Windows.Forms.MessageBox"
+        names = {x["Name"] for x in mb.proxy_schema()["Methods"]}
+        assert "Show" in names

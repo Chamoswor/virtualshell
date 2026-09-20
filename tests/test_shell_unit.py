@@ -293,14 +293,17 @@ class TestConvenience:
         created = {}
 
         class StubProxy:
-            def __init__(self, shell, type_name, object_ref):
-                created["args"] = (shell, type_name, object_ref)
+            def __init__(self, shell, type_name, object_ref, *, static=False):
+                created["args"] = (shell, type_name, object_ref, static)
 
         monkeypatch.setattr(ps_proxy_module, "PsProxy", StubProxy)
         sh = Shell(cpp_module=fake_core).start()
         proxy = sh.make_proxy("System.IO.FileInfo", "$file")
         assert isinstance(proxy, StubProxy)
-        assert created["args"] == (sh, "System.IO.FileInfo", "$file")
+        assert created["args"] == (sh, "System.IO.FileInfo", "$file", False)
+
+        sh.make_proxy("System.Math", "$t", static=True)
+        assert created["args"] == (sh, "System.Math", "$t", True)
 
     def test_make_proxy_accepts_generated_protocol_class(self, fake_core, monkeypatch):
         import virtualshell.ps_proxy as ps_proxy_module
@@ -308,8 +311,8 @@ class TestConvenience:
         created = {}
 
         class StubProxy:
-            def __init__(self, shell, type_name, object_ref):
-                created["args"] = (type_name, object_ref)
+            def __init__(self, shell, type_name, object_ref, *, static=False):
+                created["args"] = (type_name, object_ref, static)
 
         class StringBuilder:  # shaped like generate_psobject output
             __ps_type_name__ = "System.Text.StringBuilder"
@@ -321,11 +324,35 @@ class TestConvenience:
         # Default: recreate the object from the embedded expression.
         sh.make_proxy(StringBuilder)
         assert created["args"] == ("System.Text.StringBuilder",
-                                   "[System.Text.StringBuilder]::new()")
+                                   "[System.Text.StringBuilder]::new()", False)
 
         # Explicit obj_ref binds an existing variable instead.
         sh.make_proxy(StringBuilder, "$existing")
-        assert created["args"] == ("System.Text.StringBuilder", "$existing")
+        assert created["args"] == ("System.Text.StringBuilder", "$existing", False)
+
+    def test_make_proxy_honours_static_protocol_metadata(self, fake_core, monkeypatch):
+        import virtualshell.ps_proxy as ps_proxy_module
+
+        created = {}
+
+        class StubProxy:
+            def __init__(self, shell, type_name, object_ref, *, static=False):
+                created["args"] = (type_name, object_ref, static)
+
+        class Math:  # shaped like generate_psobject output for '[System.Math]'
+            __ps_type_name__ = "System.Math"
+            __ps_expression__ = "[System.Math]"
+            __ps_static__ = True
+
+        monkeypatch.setattr(ps_proxy_module, "PsProxy", StubProxy)
+        sh = Shell(cpp_module=fake_core).start()
+
+        sh.make_proxy(Math)
+        assert created["args"] == ("System.Math", "[System.Math]", True)
+
+        # Static metadata sticks when binding an existing type variable.
+        sh.make_proxy(Math, "$existing_type")
+        assert created["args"] == ("System.Math", "$existing_type", True)
 
     def test_make_proxy_rejects_class_without_metadata(self, fake_core):
         class Naked:

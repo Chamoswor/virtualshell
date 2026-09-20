@@ -66,6 +66,53 @@ def _method_call_expr(ref: str, name: str, args: List[str]) -> str:
     return f"{ref}.PSObject.Methods[{_ps_quote(name)}].Invoke({arg_text})"
 
 
+# `ref` holds a [type] object in static mode; PowerShell resolves `::` against
+# the contained type, so `$t = [Math]; $t::Sqrt(16)` works like `[Math]::Sqrt`.
+_STATIC_BINDING_FLAGS = "[System.Reflection.BindingFlags]'Public,Static"
+
+
+def _static_member_expr(ref: str, name: str) -> str:
+    """Expression reading static member `name` on the type held by `ref`."""
+    if _IDENT_RE.match(name):
+        return f"{ref}::{name}"
+    return (f"{ref}.InvokeMember({_ps_quote(name)}, "
+            f"{_STATIC_BINDING_FLAGS},GetProperty,GetField', $null, $null, @())")
+
+
+def _static_method_call_expr(ref: str, name: str, args: List[str]) -> str:
+    arg_text = ", ".join(args)
+    if _IDENT_RE.match(name):
+        return f"{ref}::{name}({arg_text})"
+    return (f"{ref}.InvokeMember({_ps_quote(name)}, "
+            f"{_STATIC_BINDING_FLAGS},InvokeMethod', $null, $null, @({arg_text}))")
+
+
+def static_type_literal(expr: str) -> Optional[str]:
+    """Return the type name inside a bare ``[Type]`` literal, else None.
+
+    A bare literal (nothing outside the brackets) is how callers name a
+    static class, e.g. ``[System.Windows.Forms.MessageBox]``. Invocations
+    (``[T]::new()``) and casts (``[int](3)``) do not match, and neither do
+    unbalanced brackets, so generic literals like
+    ``[System.Collections.Generic.List[int]]`` resolve correctly.
+    """
+    cleaned = (expr or "").strip()
+    if len(cleaned) < 3 or not (cleaned.startswith("[") and cleaned.endswith("]")):
+        return None
+    inner = cleaned[1:-1].strip()
+    if not inner or not _TYPE_LIKE_RE.fullmatch(inner):
+        return None
+    depth = 0
+    for char in inner:
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth < 0:
+                return None
+    return inner if depth == 0 else None
+
+
 def split_invocation(expr: str) -> Optional[Tuple[str, str]]:
     """Return (target, argument_text) when `expr` ends with a (...) call."""
     depth = 0
@@ -243,6 +290,60 @@ $__vs_sm = @($__vs_o.PSObject.Members |
 """.strip()
 
 
+# Static-mode counterpart: {ref} holds a [type] object, so reflection runs on
+# the type itself (not GetType(), which would describe RuntimeType). Constants
+# and static fields surface as properties; writability follows the setter /
+# IsInitOnly / IsLiteral rules.
+_STATIC_SCHEMA_SCRIPT = """
+$__vs_o = {ref}
+$__vs_flags = [System.Reflection.BindingFlags]'Public,Static'
+$__vs_props = @()
+foreach ($__vs_pi in $__vs_o.GetProperties($__vs_flags)) {{
+    $__vs_props += [pscustomobject]@{{
+        n = $__vs_pi.Name
+        t = [string]$__vs_pi.PropertyType.FullName
+        w = ($null -ne $__vs_pi.SetMethod)
+    }}
+}}
+foreach ($__vs_fi in $__vs_o.GetFields($__vs_flags)) {{
+    $__vs_props += [pscustomobject]@{{
+        n = $__vs_fi.Name
+        t = [string]$__vs_fi.FieldType.FullName
+        w = (-not ($__vs_fi.IsInitOnly -or $__vs_fi.IsLiteral))
+    }}
+}}
+$__vs_meths = @()
+try {{
+    $__vs_groups = $__vs_o.GetMethods($__vs_flags) |
+        Where-Object {{ -not $_.IsSpecialName }} |
+        Group-Object Name
+}} catch {{ $__vs_groups = @() }}
+foreach ($__vs_g in $__vs_groups) {{
+    $__vs_ovl = @(foreach ($__vs_mi in $__vs_g.Group) {{
+        [pscustomobject]@{{
+            r = $__vs_mi.ReturnType.FullName
+            p = @(foreach ($__vs_pp in $__vs_mi.GetParameters()) {{
+                [pscustomobject]@{{
+                    n = $__vs_pp.Name
+                    t = $__vs_pp.ParameterType.FullName
+                    o = $__vs_pp.IsOut
+                    rf = $__vs_pp.ParameterType.IsByRef
+                    a = $__vs_pp.ParameterType.IsArray
+                }}
+            }})
+        }}
+    }})
+    $__vs_meths += ,([pscustomobject]@{{ n = $__vs_g.Name; o = $__vs_ovl }})
+}}
+[pscustomobject]@{{
+    tn = [string]$__vs_o.FullName
+    props = $__vs_props
+    meths = $__vs_meths
+    sm = @()
+}} | ConvertTo-Json -Depth 8 -Compress
+""".strip()
+
+
 def _parse_schema(payload: Dict[str, Any]) -> Schema:
     schema = Schema(type_name=str(payload.get("tn") or "System.Object"))
 
@@ -360,6 +461,10 @@ class PsProxy:
 
     Attribute access reads/writes properties and calls methods on the
     underlying object inside the PowerShell session.
+
+    A bare ``[Type]`` literal (or ``static=True``) selects static mode: the
+    proxy binds the type itself and exposes its static methods, properties
+    and constants, invoked with ``::`` in the session.
     """
 
     def __init__(
@@ -369,6 +474,7 @@ class PsProxy:
         object_ref: str = "$obj",
         *,
         timeout: Optional[float] = None,
+        static: bool = False,
     ) -> None:
         object.__setattr__(self, "_shell", shell)
         object.__setattr__(self, "_timeout", timeout)
@@ -384,10 +490,17 @@ class PsProxy:
         if not ref:
             raise ValueError("object_ref or type_name is required")
 
+        literal = static_type_literal(ref)
+        object.__setattr__(self, "_static", bool(static) or literal is not None)
+
         if ref.startswith("$"):
             self._validate_ref(ref)
             object.__setattr__(self, "_ref", ref)
             object.__setattr__(self, "_owns_ref", False)
+        elif self._static:
+            inner = literal if literal is not None else ref
+            object.__setattr__(self, "_ref", self._materialize_static(inner))
+            object.__setattr__(self, "_owns_ref", True)
         else:
             object.__setattr__(self, "_ref", self._materialize(ref))
             object.__setattr__(self, "_owns_ref", True)
@@ -404,6 +517,18 @@ class PsProxy:
         return (res.out or "").strip()
 
     def _validate_ref(self, ref: str) -> None:
+        if self._static:
+            out = self._run(
+                f"if ({ref} -is [type]) {{ 'ok' }} "
+                f"elseif ($null -eq {ref}) {{ 'null' }} else {{ 'notatype' }}",
+                label=f"Binding to {ref}")
+            if out == "null":
+                raise ValueError(f"PowerShell variable {ref} is null or undefined")
+            if out != "ok":
+                raise ValueError(
+                    f"PowerShell variable {ref} does not hold a [type]; "
+                    "a static proxy must bind a type object")
+            return
         out = self._run(
             f"if ($null -eq {ref}) {{ 'null' }} else {{ 'ok' }}",
             label=f"Binding to {ref}")
@@ -434,13 +559,34 @@ class PsProxy:
             f"Failed to create PowerShell object from {expression!r}. Tried:\n  "
             + "\n  ".join(errors))
 
+    def _materialize_static(self, type_text: str) -> str:
+        """Bind a ``[Type]`` literal to a session variable (static mode)."""
+        inner = type_text.strip()
+        if inner.startswith("[") and inner.endswith("]"):
+            inner = inner[1:-1].strip()
+        if not inner or not _TYPE_LIKE_RE.fullmatch(inner):
+            raise ValueError(f"Cannot resolve a static type from {type_text!r}")
+
+        var = _next_var("proxy")
+        res = self._shell.run(f"${var} = [{inner}]", timeout=self._timeout)
+        if res.success:
+            check = self._shell.run(
+                f"if (${var} -is [type]) {{ 'ok' }} else {{ 'no' }}",
+                timeout=self._timeout)
+            if check.success and (check.out or "").strip() == "ok":
+                return f"${var}"
+        raise RuntimeError(
+            f"Failed to resolve static type [{inner}]: "
+            f"{(res.err or '').strip()[:200] or 'expression did not yield a type'}")
+
     def _load_schema(self, provided_type: str) -> Schema:
         run_id = self._shell.python_run_id
 
         # A provided type name is only trusted as a cache key after we have
         # resolved it once; the real type name always comes from the object.
+        script = _STATIC_SCHEMA_SCRIPT if self._static else _SCHEMA_SCRIPT
         out = self._run(
-            _SCHEMA_SCRIPT.format(ref=self._ref),
+            script.format(ref=self._ref),
             label=f"Schema query for {self._ref}")
         try:
             payload = json.loads(out)
@@ -449,8 +595,11 @@ class PsProxy:
                 f"Schema query for {self._ref} returned invalid JSON") from exc
 
         schema = _parse_schema(payload)
+        # Static schemas get their own key: the same type can also have an
+        # instance schema, and _sub_proxy looks instance schemas up by name.
+        key = f"static:{schema.type_name}" if self._static else schema.type_name
         with _SCHEMA_LOCK:
-            _SCHEMA_CACHE[(run_id, schema.type_name)] = schema
+            _SCHEMA_CACHE[(run_id, key)] = schema
         return schema
 
     @classmethod
@@ -466,6 +615,8 @@ class PsProxy:
         object.__setattr__(proxy, "_method_cache", {})
         object.__setattr__(proxy, "_ref", ref)
         object.__setattr__(proxy, "_owns_ref", True)
+        # Values returned from calls are instances, never types.
+        object.__setattr__(proxy, "_static", False)
 
         cached = self._cached_schema(self._shell.python_run_id, type_name)
         if cached is not None:
@@ -590,9 +741,10 @@ class PsProxy:
             method_cache[name] = bound
             return bound
         if name in schema.properties:
+            expr = (_static_member_expr(self._ref, name) if self._static
+                    else _member_expr(self._ref, name))
             return self._fetch_value(
-                _member_expr(self._ref, name),
-                label=f"Read property {schema.type_name}.{name}")
+                expr, label=f"Read property {schema.type_name}.{name}")
         if name in dynamic:
             return dynamic[name]
         raise AttributeError(
@@ -610,11 +762,16 @@ class PsProxy:
             meta = schema.properties[name]
             if not meta.writable:
                 raise AttributeError(f"Property {name!r} is read-only")
+            if self._static and not _IDENT_RE.match(name):
+                raise AttributeError(
+                    f"Cannot write static member {name!r}: not an identifier")
+            target = (_static_member_expr(self._ref, name) if self._static
+                      else _member_expr(self._ref, name))
             cleanup: List[str] = []
             try:
                 rhs = self._format_argument(value, cleanup=cleanup)
                 self._run(
-                    f"{_member_expr(self._ref, name)} = {rhs}",
+                    f"{target} = {rhs}",
                     label=f"Set property {schema.type_name}.{name}")
             finally:
                 self._cleanup_vars(cleanup)
@@ -632,7 +789,8 @@ class PsProxy:
         return sorted(names)
 
     def __repr__(self) -> str:
-        return f"<PsProxy type='{self._schema.type_name}' ref='{self._ref}'>"
+        kind = "static type" if self._static else "type"
+        return f"<PsProxy {kind}='{self._schema.type_name}' ref='{self._ref}'>"
 
     # -- methods ---------------------------------------------------------------
 
@@ -679,7 +837,10 @@ class PsProxy:
                     ps_args.append(self._format_argument(value,
                                                          cleanup=cleanup))
 
-            call = _method_call_expr(self._ref, meta.name, ps_args)
+            if self._static:
+                call = _static_method_call_expr(self._ref, meta.name, ps_args)
+            else:
+                call = _method_call_expr(self._ref, meta.name, ps_args)
             return_type = overload.return_type if overload else ""
             if _AWAITABLE_RE.search(return_type):
                 call = f"({call}).GetAwaiter().GetResult()"
@@ -754,7 +915,11 @@ class PsProxy:
                 for one_call in call_args[start:start + batch_size]:
                     ps_args = [self._format_argument(a, cleanup=cleanup)
                                for a in one_call]
-                    call = _method_call_expr(self._ref, method_name, ps_args)
+                    if self._static:
+                        call = _static_method_call_expr(
+                            self._ref, method_name, ps_args)
+                    else:
+                        call = _method_call_expr(self._ref, method_name, ps_args)
                     lines.append(f"$__vs_mc.Add(({call}))")
                 lines.append(
                     "ConvertTo-Json -InputObject $__vs_mc -Depth 4 -Compress")

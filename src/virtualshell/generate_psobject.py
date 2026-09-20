@@ -413,14 +413,17 @@ def _property_type(entry: MutableMapping[str, Any]) -> str:
     if isinstance(definition, list) and definition:
         definition = definition[0]
     if isinstance(definition, str):
-        token = definition.strip().split(" ", 1)[0]
+        # Static definitions read "static datetime Now {get;}".
+        text = re.sub(r"^\s*static\s+", "", definition.strip())
+        token = text.split(" ", 1)[0]
         if token and TYPE_LIKE_PATTERN.fullmatch(token):
             return token
     return ""
 
 
 def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]], *,
-                    ps_type_name: str = "", ps_expression: str = "") -> str:
+                    ps_type_name: str = "", ps_expression: str = "",
+                    ps_static: bool = False) -> str:
     grouped = categorize_members(members)
     typing_bits: Set[str] = {"Protocol"}
     runtime_bits: Set[str] = set()
@@ -472,6 +475,8 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
         meta_lines.append(f"    __ps_type_name__: ClassVar[str] = {ps_type_name!r}")
     if ps_expression:
         meta_lines.append(f"    __ps_expression__: ClassVar[str] = {ps_expression!r}")
+    if ps_static:
+        meta_lines.append("    __ps_static__: ClassVar[bool] = True")
     if meta_lines:
         typing_bits.add("ClassVar")
 
@@ -509,6 +514,21 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
     return "\n".join(lines)
 
 
+def _decode_members(raw_text: str) -> List[MutableMapping[str, Any]]:
+    if not raw_text:
+        raise RuntimeError("Get-Member returned no data")
+    try:
+        members: Any = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Failed to parse Get-Member output as JSON") from exc
+
+    if isinstance(members, MutableMapping):
+        members = [members]
+    if not members:
+        raise RuntimeError("Get-Member produced an empty result set")
+    return members
+
+
 def fetch_members(shell, command: str) -> Tuple[str, List[MutableMapping[str, Any]]]:
     shell.run("Remove-Variable obj -ErrorAction SilentlyContinue", raise_on_error=False)
     assignment = f"$obj = ({command})"
@@ -525,20 +545,28 @@ def fetch_members(shell, command: str) -> Tuple[str, List[MutableMapping[str, An
         "Get-Member -InputObject $obj | ConvertTo-Json -Depth 6 -Compress",
         raise_on_error=True,
     )
-    raw_text = (raw_result.out or "").strip()
-    if not raw_text:
-        raise RuntimeError("Get-Member returned no data")
+    return type_name, _decode_members((raw_result.out or "").strip())
 
-    try:
-        members: Any = json.loads(raw_text)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Failed to parse Get-Member output as JSON") from exc
 
-    if isinstance(members, MutableMapping):
-        members = [members]
-    if not members:
-        raise RuntimeError("Get-Member produced an empty result set")
-    return type_name, members
+def fetch_static_members(shell, type_text: str) -> Tuple[str, List[MutableMapping[str, Any]]]:
+    """Static members of ``[type_text]``.
+
+    Piping (not -InputObject) matters here: Get-Member special-cases a piped
+    System.Type with -Static and reports that type's own static members.
+    """
+    shell.run("Remove-Variable obj -ErrorAction SilentlyContinue", raise_on_error=False)
+    shell.run(f"$obj = [{type_text}]", raise_on_error=True)
+
+    type_result = shell.run("[string]$obj.FullName", raise_on_error=True)
+    type_name = (type_result.out or "").strip()
+    if not type_name:
+        raise RuntimeError("Type reports no name")
+
+    raw_result = shell.run(
+        "$obj | Get-Member -Static | ConvertTo-Json -Depth 6 -Compress",
+        raise_on_error=True,
+    )
+    return type_name, _decode_members((raw_result.out or "").strip())
 
 
 def safe_class_name(type_name: str) -> str:
@@ -556,13 +584,32 @@ def generate(shell, obj: str, output_path: Path) -> None:
     shell.run("$PSStyle.OutputRendering = 'PlainText'", raise_on_error=False)
     shell.run("$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()", raise_on_error=False)
 
-    from .ps_proxy import build_creation_strategies
+    from .ps_proxy import build_creation_strategies, static_type_literal
 
     strategies = build_creation_strategies(obj)
     errors: List[str] = []
     chosen: Optional[Tuple[str, str, str, List[MutableMapping[str, Any]]]] = None
 
     try:
+        static_inner = static_type_literal(obj)
+        if static_inner is not None:
+            try:
+                type_name, members = fetch_static_members(shell, static_inner)
+            except Exception as ex:
+                raise RuntimeError(
+                    f"Unable to materialise a static type from '{obj}': {ex}") from ex
+            expression = f"[{static_inner}]"
+            # Name the class after the caller's spelling: the reflected
+            # FullName of a closed generic is assembly-qualified soup.
+            protocol_name = safe_class_name(static_inner)
+            source = render_protocol(protocol_name, members,
+                                     ps_type_name=type_name,
+                                     ps_expression=expression, ps_static=True)
+            output_path.write_text(source, encoding="utf-8")
+            print(f"Generated {output_path} for static {type_name} "
+                  f"(expression: {expression})")
+            return
+
         for label, candidate in strategies:
             try:
                 type_name, members = fetch_members(shell, candidate)

@@ -18,7 +18,7 @@
 - `pwsh(s: str, timeout: float|None=None, raise_on_error=False) -> ExecutionResult`  _(executes a **literal** string safely)_
 - `save_session(timeout: float|None=None, raise_on_error=True) -> ExecutionResult`
 - `restore_session(snapshot_path: str|Path, timeout: float|None=None, raise_on_error=True) -> ExecutionResult`
-- `make_proxy(type_name: str, obj_ref: str = "$obj") -> PsProxy`  _(live object proxy; `obj_ref` is a `$variable` or a creation expression)_
+- `make_proxy(type_name: str, obj_ref: str = "$obj", *, static: bool = False) -> PsProxy`  _(live object proxy; `obj_ref` is a `$variable`, a creation expression, or a `[Type]` literal for a static proxy)_
 - `generate_psobject(type_expression: str, output_path: str|Path) -> None`
 - `zero_copy_bridge(frame_mb: int = 16, chunk_mb: int = 4) -> ZeroCopyBridge`  _(shared per-shell bridge, created lazily)_
 

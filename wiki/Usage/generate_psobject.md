@@ -57,6 +57,26 @@ metadata, which is what lets `make_proxy(WebClient)` recreate the object
 without repeating the PowerShell expression. Pass an explicit variable to
 bind instead: `shell.make_proxy(WebClient, "$client")`.
 
+## Static Classes
+
+Passing a bare `[Type]` literal generates a protocol for the type's
+**static** surface instead (collected with `Get-Member -Static`):
+
+```python
+shell.generate_psobject("[System.Math]", Path("Math.py"))
+```
+
+The generated class additionally embeds ``__ps_static__ = True``, so
+`make_proxy(Math)` binds a [static proxy](make_proxy.md#static-classes)
+automatically:
+
+```python
+from Math import Math
+
+math = shell.make_proxy(Math)
+math.Sqrt(16.0)     # 4.0 - with full IDE completion
+```
+
 The protocol only describes the members discovered at generation time. If the PowerShell type changes or you need a different view, rerun `generate_psobject` with the updated command.
 
 ### End-to-End Example
