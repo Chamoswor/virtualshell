@@ -46,7 +46,15 @@ file(GLOB_RECURSE VS_HEADERS CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/include/*.hpp"
 )
 
-pybind11_add_module(_core MODULE ${SRC} ${VS_HEADERS})
+# NO_EXTRAS on MSVC: pybind11's default /GL + LTCG (whole-program optimization)
+# triggers an internal compiler error (C1001) in newer MSVC toolsets
+# (observed with VS 2026 / cl 19.51) on the binder's lambda templates.
+# The binding layer is I/O-bound, so LTO buys nothing here anyway.
+if(MSVC)
+  pybind11_add_module(_core MODULE NO_EXTRAS ${SRC} ${VS_HEADERS})
+else()
+  pybind11_add_module(_core MODULE ${SRC} ${VS_HEADERS})
+endif()
 target_include_directories(_core PRIVATE cpp/include)
 
 # Link platform-specific libraries

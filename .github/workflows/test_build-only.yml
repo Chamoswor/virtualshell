@@ -199,10 +199,11 @@ jobs:
           CIBW_SKIP: "*-win32"
           CIBW_TEST_COMMAND: python -c "import virtualshell; print('ok')"
           CIBW_BUILD_VERBOSITY: "1"
+          # Ninja is forced by pyproject (cmake.args); the compiler comes from
+          # the VsDevCmd environment set up below, whatever VS version the
+          # runner image ships.
           CIBW_ENVIRONMENT_WINDOWS: >
-            CMAKE_GENERATOR="Visual Studio 17 2022"
-            CMAKE_GENERATOR_PLATFORM=x64
-            SKBUILD_CMAKE_GENERATOR="Visual Studio 17 2022"
+            CMAKE_GENERATOR=Ninja
             PYBIND11_FINDPYTHON=ON
             CMAKE_BUILD_TYPE=Release
         run: |
