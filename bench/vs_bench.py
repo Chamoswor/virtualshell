@@ -133,11 +133,8 @@ def benchmark_batch_commands(shell, batch_size=100, repeats=3, cmd_template=None
                     for i in range(batch_size)]
         t0 = time.perf_counter()
         try:
-            # Fallback to sequential if run_batch is absent:
-            if hasattr(shell, "run_batch"):
-                results = shell.run_batch(commands)
-            else:
-                results = [shell.run(c) for c in commands]
+            # Shell.run with a list dispatches one C++-side batch execution.
+            results = shell.run(commands)
         except Exception:
             failures += 1
             raise
@@ -440,7 +437,7 @@ def run_all(cfg):
         print(f"\nParallel shells: {par['shells']} shells, {par['total_cmds']} cmds "
               f"| wall={par['wall_time_s']:.3f}s | thr={par['throughput_cmds_per_s']:.1f} cmd/s")
     
-    if not all:
+    if not report["per_size"]:
         return report
     # Assessment
     batch_effs = [v["efficiency"]["batch_efficiency"] for v in report["per_size"].values()]
