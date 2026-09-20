@@ -93,6 +93,14 @@ class TestScalars:
         sb = shell.make_proxy("", "System.Text.StringBuilder")
         assert sb.Equals(sb) is True
 
+    def test_parameterized_property_as_method(self, shell):
+        # StringBuilder.Chars is an indexer (ParameterizedProperty): callable
+        # with an index argument, like in PowerShell ($sb.Chars(1)).
+        sb = shell.make_proxy("", "System.Text.StringBuilder")
+        sb.Append("Hei")
+        assert sb.Chars(1) == "e"
+        assert "Chars" in dir(sb)
+
     def test_datetime_values(self, shell):
         shell.run("$vs_dt = [datetime]::new(2024, 3, 5, 10, 20, 30)",
                   raise_on_error=True)

@@ -52,6 +52,12 @@ TYPE_MAP: Dict[str, Tuple[str, Tuple[str, ...], Tuple[str, ...]]] = {
     "System.Void": ("None", tuple(), tuple()),
     "object": ("Any", ("Any",), tuple()),
     "System.Object": ("Any", ("Any",), tuple()),
+    "datetime": ("datetime.datetime", tuple(), ("datetime",)),
+    "timespan": ("datetime.timedelta", tuple(), ("datetime",)),
+    "guid": ("str", tuple(), tuple()),
+    "version": ("str", tuple(), tuple()),
+    "uri": ("str", tuple(), tuple()),
+    "decimal": ("float", tuple(), tuple()),
 }
 
 METHOD_PATTERN = re.compile(r"(?P<ret>[^\s]+)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<params>.*)\)")
@@ -164,6 +170,12 @@ def map_ps_type(type_name: str) -> Tuple[str, Set[str], Set[str]]:
         typing_bits.add("Any")
         return "Any", typing_bits, runtime_bits
 
+    # char[] binds from a plain string in PowerShell (the binder converts),
+    # and Python has no char type - so `str` is the accurate annotation.
+    # Mapping it to List[str] would wrongly suggest lists of words are valid.
+    if name in {"char[]", "Char[]", "System.Char[]"}:
+        return "str", typing_bits, runtime_bits
+
     array_match = ARRAY_PATTERN.fullmatch(name)
     if array_match:
         inner = array_match.group("inner")
@@ -244,42 +256,99 @@ def parse_parameters(raw: str) -> List[Tuple[str, str, Set[str], Set[str]]]:
     return result
 
 
-def build_method_signature(name: str, entry: MutableMapping[str, Any], typing_bits: Set[str], runtime_bits: Set[str]) -> str:
-    definition: Any = entry.get("Definition")
-    if isinstance(definition, list) and definition:
-        definition = definition[0]
-    if not isinstance(definition, str):
-        overloads: Any = entry.get("OverloadDefinitions")
-        if isinstance(overloads, list) and overloads:
-            definition = overloads[0]
-        else:
-            definition = ""
+def split_signatures(definition: str) -> List[str]:
+    """Split a Get-Member Definition into its individual overload signatures.
 
-    definition = first_signature(definition.strip())
-    # Static members are rendered as "static <ret> Name(...)" by Get-Member.
-    definition = re.sub(r"^\s*static\s+", "", definition)
-    match = METHOD_PATTERN.match(definition)
-    if not match:
+    Overloads are joined with ", " at the top level; commas inside parameter
+    lists `()` and generic brackets `[]` must not split.
+    """
+    parts: List[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(definition):
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            parts.append(definition[start:index])
+            start = index + 1
+    parts.append(definition[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def build_method_signatures(name: str, entry: MutableMapping[str, Any], typing_bits: Set[str], runtime_bits: Set[str]) -> List[str]:
+    """Render stub lines for a method, one `@overload` per distinct signature.
+
+    .NET methods are overloaded rather than having optional parameters, so a
+    call like ``sb.Append("x")`` only type-checks when every overload arity
+    is present in the generated Protocol.
+    """
+    definitions: List[str] = []
+    raw: Any = entry.get("Definition")
+    if isinstance(raw, list):
+        definitions.extend(item for item in raw if isinstance(item, str))
+    elif isinstance(raw, str):
+        definitions.append(raw)
+    raw = entry.get("OverloadDefinitions")
+    if isinstance(raw, list):
+        definitions.extend(item for item in raw if isinstance(item, str))
+
+    # (param annotations) -> (return annotation, parameters); first return wins
+    # so char/string overloads that both map to `str` collapse into one stub.
+    signatures: "OrderedDict[Tuple[str, ...], Tuple[str, List[Tuple[str, str, Set[str], Set[str]]]]]" = OrderedDict()
+    for text in definitions:
+        for sig_text in split_signatures(text):
+            # Static members are rendered as "static <ret> Name(...)".
+            sig_text = re.sub(r"^\s*static\s+", "", sig_text)
+            match = METHOD_PATTERN.match(sig_text)
+            if not match:
+                continue
+            return_ann, extra_typing, extra_runtime = map_ps_type(match.group("ret"))
+            parameters = parse_parameters(match.group("params"))
+            key = tuple(annotation for _, annotation, _, _ in parameters)
+            if key in signatures:
+                continue
+            typing_bits.update(extra_typing)
+            runtime_bits.update(extra_runtime)
+            for _, _, t_bits, r_bits in parameters:
+                typing_bits.update(t_bits)
+                runtime_bits.update(r_bits)
+            signatures[key] = (return_ann, parameters)
+
+    def render(return_ann: str, parameters: List[Tuple[str, str, Set[str], Set[str]]]) -> str:
+        params_text = ", ".join(f"{param}: {annotation}"
+                                for param, annotation, _, _ in parameters)
+        if params_text:
+            return f"    def {name}(self, {params_text}) -> {return_ann}: ..."
+        return f"    def {name}(self) -> {return_ann}: ..."
+
+    if not signatures:
         typing_bits.add("Any")
-        return f"    def {name}(self, *args: Any, **kwargs: Any) -> Any: ..."
+        return [f"    def {name}(self, *args: Any, **kwargs: Any) -> Any: ..."]
 
-    return_ann, extra_typing, extra_runtime = map_ps_type(match.group("ret"))
-    typing_bits.update(extra_typing)
-    runtime_bits.update(extra_runtime)
+    if len(signatures) == 1:
+        return_ann, parameters = next(iter(signatures.values()))
+        return [render(return_ann, parameters)]
 
-    parameters = parse_parameters(match.group("params"))
-    params_text = ", ".join(f"{param}: {annotation}" for param, annotation, t_bits, r_bits in parameters)
-    for _, _, t_bits, r_bits in parameters:
-        typing_bits.update(t_bits)
-        runtime_bits.update(r_bits)
+    typing_bits.update({"Any", "overload"})
+    lines: List[str] = []
+    for return_ann, parameters in signatures.values():
+        lines.append("    @overload")
+        lines.append(render(return_ann, parameters))
+    # Catch-all implementation so the @overload group is valid in a .py file.
+    lines.append(f"    def {name}(self, *args: Any, **kwargs: Any) -> Any: ...")
+    return lines
 
-    if params_text:
-        return f"    def {name}(self, {params_text}) -> {return_ann}: ..."
-    return f"    def {name}(self) -> {return_ann}: ..."
 
-
-PROPERTY_FLAGS = {1, 2, 4, 16, 32, 512}
-METHOD_FLAGS = {64, 128, 256}
+# PSMemberTypes values: AliasProperty=1, CodeProperty=2, Property=4,
+# NoteProperty=8, ScriptProperty=16, PropertySet=32.
+PROPERTY_FLAGS = {1, 2, 4, 8, 16, 32}
+# Method=64, CodeMethod=128, ScriptMethod=256, ParameterizedProperty=512.
+# Parameterized properties (indexers like StringBuilder.Chars) take arguments
+# and are invoked with method syntax in PowerShell, so they render as methods.
+METHOD_FLAGS = {64, 128, 256, 512}
+NOTE_PROPERTY_FLAGS = {1, 8}  # AliasProperty / NoteProperty: always writable
 
 
 def categorize_members(members: Iterable[MutableMapping[str, Any]]) -> Dict[str, OrderedDict[str, MutableMapping[str, Any]]]:
@@ -300,11 +369,9 @@ def categorize_members(members: Iterable[MutableMapping[str, Any]]) -> Dict[str,
             continue
 
         member_type_text = str(member_type or "")
-        if "Method" in member_type_text:
+        if "Method" in member_type_text or member_type_text == "ParameterizedProperty":
             methods.setdefault(name, entry)
         elif "Property" in member_type_text:
-            properties.setdefault(name, entry)
-        elif member_type_text in {"NoteProperty", "AliasProperty"}:
             properties.setdefault(name, entry)
 
     return {"Methods": methods, "Properties": properties}
@@ -329,11 +396,31 @@ def property_is_writable(entry: MutableMapping[str, Any]) -> bool:
     member_type = entry.get("MemberType")
     if isinstance(member_type, str) and member_type in {"NoteProperty", "AliasProperty"}:
         return True
+    if isinstance(member_type, int) and member_type in NOTE_PROPERTY_FLAGS:
+        return True
 
     return False
 
 
-def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]) -> str:
+def _property_type(entry: MutableMapping[str, Any]) -> str:
+    """Best-effort property type: TypeNameOfValue when present, else the
+    leading type token of the Get-Member Definition ("int Year {get;}")."""
+    explicit = entry.get("TypeNameOfValue")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+
+    definition = entry.get("Definition")
+    if isinstance(definition, list) and definition:
+        definition = definition[0]
+    if isinstance(definition, str):
+        token = definition.strip().split(" ", 1)[0]
+        if token and TYPE_LIKE_PATTERN.fullmatch(token):
+            return token
+    return ""
+
+
+def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]], *,
+                    ps_type_name: str = "", ps_expression: str = "") -> str:
     grouped = categorize_members(members)
     typing_bits: Set[str] = {"Protocol"}
     runtime_bits: Set[str] = set()
@@ -341,7 +428,7 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
     prop_lines: List[str] = []
     for original_name, entry in grouped["Properties"].items():
         safe_name = sanitize_identifier(original_name)
-        annotation, t_bits, r_bits = map_ps_type(str(entry.get("TypeNameOfValue", "")))
+        annotation, t_bits, r_bits = map_ps_type(_property_type(entry))
         typing_bits.update(t_bits)
         runtime_bits.update(r_bits)
         prop_lines.append("    @property")
@@ -358,9 +445,13 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
         if safe_name in seen_method_names:
             continue
         seen_method_names.add(safe_name)
-        line = build_method_signature(safe_name, entry, typing_bits, runtime_bits)
-        method_lines.append(line)
+        stub_lines = build_method_signatures(safe_name, entry, typing_bits, runtime_bits)
+        method_lines.extend(stub_lines)
+        if len(stub_lines) > 1:
+            method_lines.append("")  # visual separation after overload groups
 
+    if method_lines and method_lines[-1] == "":
+        method_lines.pop()
     method_lines.append("    def proxy_multi_call(self, func: Callable[..., Any], *args: Any) -> List[Any]: ...")
     method_lines.append("    def proxy_schema(self) -> Dict[str, Any]: ...")
     method_lines.append("")
@@ -373,6 +464,16 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
 
     if prop_lines and prop_lines[-1] == "":
         prop_lines.pop()
+
+    # Embedded metadata lets `Shell.make_proxy(GeneratedProtocol)` recreate
+    # the object without the caller repeating the PowerShell expression.
+    meta_lines: List[str] = []
+    if ps_type_name:
+        meta_lines.append(f"    __ps_type_name__: ClassVar[str] = {ps_type_name!r}")
+    if ps_expression:
+        meta_lines.append(f"    __ps_expression__: ClassVar[str] = {ps_expression!r}")
+    if meta_lines:
+        typing_bits.add("ClassVar")
 
     lines: List[str] = []
     lines.append("# This file was generated by virtualshell.generate_psobject")
@@ -391,8 +492,13 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
     lines.append("")
     lines.append(f"class {class_name}(Protocol):")
 
+    if meta_lines:
+        lines.extend(meta_lines)
+        lines.append("")
+
     if not prop_lines and not method_lines:
-        lines.append("    ...")
+        if not meta_lines:
+            lines.append("    ...")
     else:
         lines.extend(prop_lines)
         if prop_lines and method_lines:
@@ -471,7 +577,8 @@ def generate(shell, obj: str, output_path: Path) -> None:
 
         label, expression, type_name, members = chosen
         protocol_name = safe_class_name(type_name)
-        source = render_protocol(protocol_name, members)
+        source = render_protocol(protocol_name, members,
+                                 ps_type_name=type_name, ps_expression=expression)
         output_path.write_text(source, encoding="utf-8")
         print(f"Generated {output_path} for {type_name} (strategy: {label}; expression: {expression})")
     finally:

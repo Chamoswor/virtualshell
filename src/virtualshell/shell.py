@@ -12,12 +12,17 @@ import tempfile
 import time
 import concurrent.futures as cf
 from pathlib import Path
-from typing import Iterable, List, Dict, Optional, Callable, Any, Union, cast, overload, Sequence, TYPE_CHECKING
+from typing import Iterable, List, Dict, Optional, Callable, Any, Type, TypeVar, Union, cast, overload, Sequence, TYPE_CHECKING
 from concurrent.futures import Future
 from .generate_psobject import generate
 from . import _module
 from ._module import ExecutionResult, BatchProgress, Config, VirtualShell
-from ._protocols import ExitCode, PsProxyLike
+from ._protocols import ExitCode
+
+if TYPE_CHECKING:
+    from .ps_proxy import PsProxy
+
+_ProxyProtocol = TypeVar("_ProxyProtocol")
 
 # ---------- Exceptions ----------
 # Narrow, typed exceptions help callers implement precise retry/telemetry policies.
@@ -486,14 +491,38 @@ class Shell:
                 self._zcb = ZeroCopyBridge(self, frame_mb=frame_mb, chunk_mb=chunk_mb)
             return self._zcb
 
-    def make_proxy(self, type_name: str, obj_ref: str = "$obj") -> PsProxyLike:
+    @overload
+    def make_proxy(self, type_name: str, obj_ref: Optional[str] = None) -> "PsProxy": ...
+
+    @overload
+    def make_proxy(self, type_name: Type[_ProxyProtocol], obj_ref: Optional[str] = None) -> _ProxyProtocol: ...
+
+    def make_proxy(self, type_name: Union[str, Type[Any]], obj_ref: Optional[str] = None) -> Any:
         """Create a live proxy for a PowerShell object.
 
-        `obj_ref` may be an existing variable ("$obj"), or a creation
-        expression such as "System.Text.StringBuilder(32)".
+        Two call forms:
+
+        - ``make_proxy("", obj_ref)`` where `obj_ref` is an existing variable
+          ("$client") or a creation expression ("System.Text.StringBuilder(32)").
+        - ``make_proxy(GeneratedProtocol)`` where the class was produced by
+          `generate_psobject`: the embedded ``__ps_expression__`` metadata
+          recreates the object, and the return value is typed as the protocol
+          so no annotation is needed. Pass `obj_ref` (e.g. "$existing") to
+          bind an existing variable instead of creating a new object.
         """
         from .ps_proxy import PsProxy
-        return PsProxy(self, type_name, obj_ref)
+
+        if isinstance(type_name, type):
+            proto = type_name
+            ps_type = str(getattr(proto, "__ps_type_name__", "") or "")
+            expression = str(getattr(proto, "__ps_expression__", "") or "") or ps_type
+            if not expression:
+                raise TypeError(
+                    f"{proto.__name__} carries no __ps_type_name__/__ps_expression__ "
+                    "metadata; regenerate it with generate_psobject")
+            return PsProxy(self, ps_type, obj_ref if obj_ref is not None else expression)
+
+        return PsProxy(self, type_name, obj_ref if obj_ref is not None else "$obj")
 
     def generate_psobject(self, command: str, output_path: Path) -> None:
         """Generate a PowerShell object from a command."""

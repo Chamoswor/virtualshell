@@ -1,124 +1,163 @@
 # make_proxy
 
-`Shell.make_proxy` materialises a dynamic Python object that forwards attribute access to a PowerShell instance. It is the ergonomic way to work with .NET / PowerShell objects while staying in Python.
+`Shell.make_proxy` returns a live Python proxy for a PowerShell/.NET object. Attribute reads, property writes and method calls run inside the PowerShell session, and results are converted to Python values based on their **actual runtime type** — never guessed from metadata.
+
+The proxy is implemented in pure Python and works on Windows, Linux and macOS. Bulk binary data (byte arrays, buffers) automatically travels through the [Zero-Copy Bridge](Zero-Copy%20Bridge.md) instead of the text channel.
 
 ## Signature
 
 ```python
-proxy = shell.make_proxy(type_name: str,
-                         object_expression: str,
-                         *,
-                         depth: int = 4)
+proxy = shell.make_proxy(type_name: str, obj_ref: str | None = None)
+proxy = shell.make_proxy(GeneratedProtocol, obj_ref: str | None = None)
 ```
 
 | Parameter | Description |
 |-----------|-------------|
-| `type_name` | Friendly name assigned to the proxy type (used for error messages and `__type_name__`). |
-| `object_expression` | PowerShell expression that resolves to the underlying object (for example `"$client"`. |
-| `depth` | Controls how deep `Get-Member` metadata is harvested (default `4`). Increase when nested members expose additional structure. |
+| `type_name` | Optional label (`""` is fine — the real type is resolved from the live object), **or** a Protocol class produced by `generate_psobject`. |
+| `obj_ref` | Either an existing PowerShell variable (`"$client"`), or a **creation expression** such as `"System.Text.StringBuilder(32)"`. Creation tries `[Type]::new(...)`, `New-Object`, and COM instantiation in order. |
 
-The call returns a live proxy object. Attribute reads and method invocations transparently run in PowerShell, and results are coerced back to Python scalars when possible.
+With a generated Protocol class as the first argument, the object is created
+from the metadata embedded in the class, and the return value is typed as the
+protocol — no annotation needed:
+
+```python
+from StringBuilder import StringBuilder
+
+sb = shell.make_proxy(StringBuilder)          # created AND typed in one call
+sb.Append("x")                                 # full IDE completion
+
+bound = shell.make_proxy(StringBuilder, "$existing")   # bind + keep typing
+```
+
+Binding to a `$variable` that is null or undefined raises `ValueError`. A creation expression that no strategy can materialise raises `RuntimeError` with a per-strategy error report.
 
 ## Basic Usage
 
 ```python
 from virtualshell import Shell
 
-with Shell(strip_results=True) as sh:
-    sh.run("$client = [System.Net.WebClient]::new()")
-    client = sh.make_proxy("WebClientProxy", "$client")
+with Shell() as sh:
+    # Create the object through the proxy...
+    sb = sh.make_proxy("", "System.Text.StringBuilder")
+    sb.Append("Hello ")
+    sb.Append("World")
+    print(sb.ToString())        # "Hello World"
+    print(sb.Length)            # 11 (a real Python int)
 
-    content = client.DownloadString("https://www.example.com")
-    print(content[:120])
+    # ...or bind to an object you created yourself
+    sh.run("$client = [System.Net.WebClient]::new()")
+    client = sh.make_proxy("", "$client")
 ```
+
+## Value Conversion
+
+Every read is routed through a runtime type check in PowerShell:
+
+| PowerShell value | Python result |
+|------------------|---------------|
+| `$null` | `None` |
+| `[string]`, `[char]`, `[guid]`, `[version]`, `[uri]` | `str` |
+| Integer types (`[int]`, `[long]`, `[byte]`, ...) | `int` |
+| `[double]`, `[single]`, `[decimal]` | `float` |
+| `[bool]` | `bool` |
+| Enums (`[DayOfWeek]`, ...) | `str` (the enum name) |
+| `[datetime]` | `datetime.datetime` |
+| `[timespan]` | `datetime.timedelta` |
+| `[byte[]]` | `bytes` — transferred via the Zero-Copy Bridge |
+| Anything else | A new **sub-proxy** bound to the value |
+
+Strings survive newlines, quotes and non-ASCII characters in both directions.
+
+### Sub-proxies
+
+Complex return values and properties come back as live proxies referencing the value in the session:
+
+```python
+sb = sh.make_proxy("", "System.Text.StringBuilder")
+same = sb.Append("abc")     # StringBuilder.Append returns the builder
+same.Append("def")          # still the same underlying object
+print(sb.ToString())        # "abcdef"
+```
+
+### Binary data and buffers
+
+`bytes` arguments and `byte[]` results move through shared memory, so multi-megabyte payloads are practical:
+
+```python
+ms = sh.make_proxy("", "System.IO.MemoryStream")
+ms.Write(payload, 0, len(payload))      # bytes -> PowerShell via the bridge
+data = ms.ToArray()                     # byte[] -> Python bytes via the bridge
+
+# Mutable out-buffers: pass a bytearray, it is filled in place
+ms.Position = 0
+buffer = bytearray(5)
+count = ms.Read(buffer, 0, 5)           # buffer now holds the bytes read
+```
+
+## Methods and Properties
+
+- Methods take positional arguments only; keyword arguments raise `TypeError`.
+- Overloads are matched by argument count; `.NET Task`/`ValueTask` methods are awaited automatically (`GetAwaiter().GetResult()`).
+- Argument types marshalled inline: `None`, `bool`, `int`, `float`, `str`, `datetime`, `timedelta`, lists/tuples (`@(...)`), dicts (`@{...}`), other proxies (passed by reference), and `bytes` (via the bridge).
+- Writable properties can be assigned (`ms.Position = 0`); assigning a read-only property raises `AttributeError`.
+- Unknown attribute names raise `AttributeError`; failed PowerShell invocations raise `virtualshell.ExecutionError` with the original error text.
+- Names that are not PowerShell members can still be assigned — they are stored Python-side on the proxy.
+
+## Proxy API
+
+| Member | Description |
+|--------|-------------|
+| `proxy.type_name` | The object's real PowerShell type name. |
+| `proxy.ps_ref` | The `$variable` the proxy is bound to. |
+| `proxy.proxy_schema()` | Dict with `TypeName`, `Methods` (name/overload count) and `Properties` (name/type/writable). |
+| `proxy.proxy_multi_call(method, args)` | Batch many invocations into few PowerShell round-trips (see below). |
+| `proxy.to_psobject(depth=2)` | CliXml snapshot of the object as a [`PSObject`](Zero-Copy%20Bridge.md#psobject), via the bridge. |
+| `proxy.release()` | Remove the proxy's session variable (only when the proxy created it). |
+| `dir(proxy)` | Lists members for IDE auto-completion. |
+
+### Batch calls with proxy_multi_call
+
+```python
+with Shell(timeout_seconds=120) as sh:
+    sw = sh.make_proxy("", "System.IO.StreamWriter('file.txt')")
+    lines = [f"Line {i}" for i in range(1000)]
+
+    sw.proxy_multi_call(sw.WriteLine, lines)   # one argument per call
+    sw.Flush(); sw.Close()
+
+    al = sh.make_proxy("", "System.Collections.ArrayList")
+    al.proxy_multi_call(al.Add, ["a", "b", "c"])   # -> [0, 1, 2]
+```
+
+Pass a list for one-argument-per-call, or an `int` to repeat a no-argument call. Results are returned as JSON-decoded values.
+
+### Snapshots
+
+```python
+sh.run("$user = [pscustomobject]@{ Name = 'Kim'; Id = 7 }")
+user = sh.make_proxy("", "$user")
+snapshot = user.to_psobject()      # PSObject: a detached copy
+print(snapshot["Name"], snapshot["Id"])
+```
+
+Use the live proxy to *act on* the object, and `to_psobject()` when you want a plain data copy to keep or inspect in Python.
 
 ## Integrating with Generated Protocols
 
-Pair `make_proxy` with [`generate_psobject`](generate_psobject.md) to preserve type information:
+Pair `make_proxy` with [`generate_psobject`](generate_psobject.md) to inform type checkers:
 
 ```python
 from WebClient import WebClient  # generated protocol
 from virtualshell import Shell
 
 with Shell() as sh:
-    proxy = sh.make_proxy("WebClientProxy", "System.Net.WebClient")
-    client: WebClient = proxy  # type checker now knows the shape
-
+    client: WebClient = sh.make_proxy("", "System.Net.WebClient")
     print(client.BaseAddress)
 ```
 
-
-
-## Optimizations implemented
-- Member metadata is cached per proxy type to avoid repeated `Get-Member` calls.
-- Repeated method calls with the same argument types reuse prepared PowerShell scripts for speed. Usage:
-
-### Example - Basic File Writing/Reading
-```python
-from virtualshell import Shell
-with Shell(strip_results=True, timeout_seconds=120) as sh:
-    sw = sh.make_proxy("StreamWriterProxy", "System.IO.StreamWriter('file.txt')")
-
-    for i in range(5):
-        sw.WriteLine(f"Line {i}")
-
-    sw.Flush()
-    sw.Close()
-    sw.Dispose()
-
-    sr = sh.make_proxy("StreamReaderProxy", "System.IO.StreamReader('file.txt')")
-    while not sr.EndOfStream:
-        print(sr.ReadLine())
-
-    sr.Close()
-    sr.Dispose()
-```
-
-### Example - Using proxy_multi_call for batch calls
-```python
-from virtualshell import Shell
-with Shell(strip_results=True, timeout_seconds=120, stdin_buffer_size=640 * 1024) as sh:
-    sw = sh.make_proxy("StreamWriterProxy", "System.IO.StreamWriter('file.txt')")
-    num_lines = 1000
-    lines = [f"Line {i}" for i in range(num_lines)]
-
-    # Batch write 1000 lines in one PowerShell call
-    sw.proxy_multi_call(sw.WriteLine, lines)
-
-    sw.Flush()
-    sw.Close()
-    sw.Dispose()
-
-    sr = sh.make_proxy("StreamReaderProxy", "System.IO.StreamReader('file.txt')")
-    r: list[str] = sr.proxy_multi_call(sr.ReadLine, num_lines)
-
-    # Print the first 100 lines
-    for line in r[:100]:
-        print(line)
-
-    sr.Close()
-    sr.Dispose()
-```
-
-## Attributes Available on a Proxy
-
-- Regular properties call into PowerShell (including updating values if the property is writable).
-- Methods support positional arguments; asynchronous .NET Task-returning methods are awaited automatically.
-- `proxy_schema` returns a dictionary of member names to their types (as strings).
-- `proxy_multi_call` enables batching multiple method calls into a single PowerShell invocation for performance.
-- `__getattr__` and `__setattr__` support dynamic member access.
-- `__dict__` exposes a per-proxy dictionary for dynamic Python-side state.
-- `__dir__` lists available members for IDE auto-completion.
-- `__repr__` shows the proxy type and underlying PowerShell expression.
-## Error Handling
-
-- Missing members raise `AttributeError`.
-- PowerShell invocation failures raise `ValueError` with the original PowerShell error text.
-- Argument conversion uses the same literal formatting as synchronous `Shell.run`; unsupported types raise `TypeError`.
-
 ## Tips
 
-- Keep your proxies alive only while the `Shell` is running. After `.stop()` the backing object is no longer valid.
-- Use `depth` selectively; very deep `Get-Member` calls can be slow for large graphs.
-- Combine with Python's `typing.cast` to inform type-checkers about the protocol you expect the proxy to satisfy.
-- Use `proxy_multi_call` for high-frequency method invocations to reduce inter-process overhead.
+- Proxies are only valid while the `Shell` is running; after `.stop()` the backing objects are gone.
+- Schemas are cached per type per session — creating many proxies of the same type is cheap.
+- One `Shell` shares a single Zero-Copy Bridge (created lazily on first binary transfer) — you do not need to manage it yourself.
+- Call `release()` on short-lived proxies you create in a loop to avoid accumulating session variables.

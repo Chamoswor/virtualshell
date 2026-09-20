@@ -7,7 +7,7 @@ import shutil
 import pytest
 
 from virtualshell.generate_psobject import (
-    build_method_signature,
+    build_method_signatures,
     categorize_members,
     first_signature,
     map_ps_type,
@@ -16,6 +16,7 @@ from virtualshell.generate_psobject import (
     render_protocol,
     safe_class_name,
     sanitize_identifier,
+    split_signatures,
 )
 
 
@@ -30,6 +31,12 @@ class TestMapPsType:
         annotation, typing_bits, _ = map_ps_type("byte[]")
         assert annotation == "List[int]"
         assert "List" in typing_bits
+
+    def test_char_array_is_str(self):
+        # PowerShell's binder converts a string to char[], and List[str]
+        # would wrongly accept lists of multi-character strings.
+        assert map_ps_type("char[]")[0] == "str"
+        assert map_ps_type("System.Char[]")[0] == "str"
 
     def test_nullable(self):
         annotation, typing_bits, _ = map_ps_type("System.Nullable`1[System.Int32]")
@@ -88,18 +95,28 @@ class TestSignatures:
     def test_first_signature_splits_overloads(self):
         assert first_signature("int M(int a), int M(string b)") == "int M(int a)"
 
+    def test_split_signatures(self):
+        sigs = split_signatures(
+            "int M(int a), string M(System.Collections.Generic.Dictionary`2[string,int] map)")
+        assert sigs == [
+            "int M(int a)",
+            "string M(System.Collections.Generic.Dictionary`2[string,int] map)",
+        ]
+
     def test_static_prefix_stripped(self):
         typing_bits, runtime_bits = set(), set()
-        line = build_method_signature(
+        lines = build_method_signatures(
             "Join", {"Definition": "static string Join(string separator, string[] value)"},
             typing_bits, runtime_bits)
-        assert "def Join(self, separator: str, value: List[str]) -> str" in line
+        assert len(lines) == 1
+        assert "def Join(self, separator: str, value: List[str]) -> str" in lines[0]
 
     def test_unparseable_falls_back_to_varargs(self):
         typing_bits, runtime_bits = set(), set()
-        line = build_method_signature("Weird", {"Definition": "?!"},
-                                      typing_bits, runtime_bits)
-        assert "*args: Any" in line
+        lines = build_method_signatures("Weird", {"Definition": "?!"},
+                                        typing_bits, runtime_bits)
+        assert len(lines) == 1
+        assert "*args: Any" in lines[0]
 
     def test_sanitize_identifier(self):
         assert sanitize_identifier("123abc") == "_123abc"
@@ -109,6 +126,53 @@ class TestSignatures:
     def test_safe_class_name(self):
         assert safe_class_name("System.Text.StringBuilder") == "StringBuilder"
         assert safe_class_name("") == "PSObject"
+
+
+class TestOverloads:
+    APPEND = {
+        "Name": "Append",
+        "MemberType": 64,
+        "Definition": (
+            "System.Text.StringBuilder Append(char value, int repeatCount), "
+            "System.Text.StringBuilder Append(string value), "
+            "System.Text.StringBuilder Append(bool value)"
+        ),
+    }
+
+    def test_every_arity_is_emitted(self):
+        typing_bits, runtime_bits = set(), set()
+        lines = build_method_signatures("Append", dict(self.APPEND),
+                                        typing_bits, runtime_bits)
+        text = "\n".join(lines)
+        # Single-argument calls must type-check: the 1-arg overload exists.
+        assert "def Append(self, value: str) -> Any: ..." in text
+        assert "def Append(self, value: str, repeatCount: int) -> Any: ..." in text
+        assert text.count("@overload") >= 2
+        # A catch-all implementation closes the overload group.
+        assert lines[-1] == "    def Append(self, *args: Any, **kwargs: Any) -> Any: ..."
+        assert "overload" in typing_bits
+
+    def test_equivalent_overloads_are_deduplicated(self):
+        # char and string both map to `str`; bool is separate.
+        typing_bits, runtime_bits = set(), set()
+        lines = build_method_signatures("Append", dict(self.APPEND),
+                                        typing_bits, runtime_bits)
+        text = "\n".join(lines)
+        assert text.count("def Append(self, value: str) -> Any: ...") == 1
+        assert "def Append(self, value: bool) -> Any: ..." in text
+
+    def test_single_overload_has_no_decorator(self):
+        typing_bits, runtime_bits = set(), set()
+        lines = build_method_signatures(
+            "One", {"Definition": "void One(int x)"}, typing_bits, runtime_bits)
+        assert lines == ["    def One(self, x: int) -> None: ..."]
+        assert "overload" not in typing_bits
+
+    def test_overloaded_protocol_compiles_and_imports_overload(self):
+        members = [dict(self.APPEND)]
+        source = render_protocol("Sb", members)
+        compile(source, "<generated>", "exec")
+        assert "overload" in source.split("from typing import ", 1)[1].splitlines()[0]
 
 
 class TestCategorizeAndWritable:
@@ -121,6 +185,25 @@ class TestCategorizeAndWritable:
         grouped = categorize_members(members)
         assert list(grouped["Methods"]) == ["M"]
         assert set(grouped["Properties"]) == {"P", "N"}
+
+    def test_parameterized_property_is_a_method(self):
+        # Indexers (StringBuilder.Chars) take arguments and are invoked with
+        # method syntax; rendering them as plain properties would produce
+        # stubs that cannot be called correctly.
+        for member_type in (512, "ParameterizedProperty"):
+            members = [{"Name": "Chars", "MemberType": member_type,
+                        "Definition": "char Chars(int index) {get;set;}"}]
+            grouped = categorize_members(members)
+            assert list(grouped["Methods"]) == ["Chars"]
+            assert not grouped["Properties"]
+
+    def test_parameterized_property_renders_with_index_argument(self):
+        members = [{"Name": "Chars", "MemberType": 512,
+                    "Definition": "char Chars(int index) {get;set;}"}]
+        source = render_protocol("Sb", members)
+        compile(source, "<generated>", "exec")
+        assert "def Chars(self, index: int) -> str: ..." in source
+        assert "@property\n    def Chars" not in source
 
     def test_property_writable_from_definition(self):
         assert property_is_writable({"Definition": "string P {get;set;}"}) is True
@@ -158,6 +241,19 @@ class TestRenderProtocol:
         source = render_protocol("MyProxy", self.MEMBERS)
         assert "def Length(self, value" not in source
 
+    def test_metadata_classvars_embedded_when_provided(self):
+        source = render_protocol(
+            "MyProxy", self.MEMBERS,
+            ps_type_name="My.Type", ps_expression="[My.Type]::new()")
+        compile(source, "<generated>", "exec")
+        assert "__ps_type_name__: ClassVar[str] = 'My.Type'" in source
+        assert "__ps_expression__: ClassVar[str] = '[My.Type]::new()'" in source
+        assert "ClassVar" in source.split("from typing import ", 1)[1].splitlines()[0]
+
+    def test_no_metadata_classvars_by_default(self):
+        source = render_protocol("MyProxy", self.MEMBERS)
+        assert "__ps_type_name__" not in source
+
 
 # =============================================================================
 # Integration
@@ -177,15 +273,17 @@ integration = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="module")
+def shell():
+    from virtualshell import Shell
+
+    sh = Shell(timeout_seconds=60).start()
+    yield sh
+    sh.stop(force=True)
+
+
 @integration
 class TestGenerateEndToEnd:
-    @pytest.fixture(scope="class")
-    def shell(self):
-        from virtualshell import Shell
-
-        sh = Shell(timeout_seconds=60).start()
-        yield sh
-        sh.stop(force=True)
 
     def test_generate_for_datetime(self, shell, tmp_path):
         from virtualshell.generate_psobject import generate
@@ -229,3 +327,43 @@ class TestGenerateEndToEnd:
         for expected in ("Append", "ToString", "Length"):
             assert expected in source
             assert expected in live
+
+        # Overloaded methods must expose every arity so single-argument
+        # calls type-check (Append has both 1- and 2-argument overloads).
+        assert "@overload" in source
+        assert "def Append(self, value: str) -> " in source
+
+        # The Chars indexer must be a callable method in BOTH the stub and
+        # the live proxy - never an argument-less property.
+        assert "def Chars(self, index: int) -> str: ..." in source
+        assert "@property\n    def Chars" not in source
+        assert "Chars" in live
+
+    def test_make_proxy_from_generated_protocol_class(self, shell, tmp_path):
+        """generate -> import -> make_proxy(ProtocolClass) round trip."""
+        import importlib.util
+
+        from virtualshell.generate_psobject import generate
+
+        out_file = tmp_path / "sb_protocol.py"
+        generate(shell, "System.Text.StringBuilder()", out_file)
+
+        spec = importlib.util.spec_from_file_location("sb_protocol", out_file)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        StringBuilder = module.StringBuilder
+
+        assert StringBuilder.__ps_type_name__ == "System.Text.StringBuilder"
+
+        # Create a fresh object from the embedded expression.
+        sb = shell.make_proxy(StringBuilder)
+        sb.Append("via protokoll-klassen")
+        assert sb.ToString() == "via protokoll-klassen"
+        assert sb.type_name == "System.Text.StringBuilder"
+
+        # Bind an existing variable while keeping the protocol typing.
+        shell.run("$vs_gen_bind = [System.Text.StringBuilder]::new()",
+                  raise_on_error=True)
+        bound = shell.make_proxy(StringBuilder, "$vs_gen_bind")
+        bound.Append("bundet")
+        assert shell.run("$vs_gen_bind.ToString()").out.strip() == "bundet"

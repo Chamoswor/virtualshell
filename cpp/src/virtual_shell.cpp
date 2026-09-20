@@ -876,6 +876,13 @@ std::string VirtualShell::build_pwsh_packet(uint64_t id, std::string_view cmd) {
     full.append(cmd);
     if (full.empty() || full.back() != '\n') full.push_back('\n'); // Ensure trailing newline
 
+    // Blank line: pwsh's interactive stdin reader only executes a pending
+    // multi-line construct (foreach {...}, try/catch, trailing-pipe
+    // continuations, ...) once it sees an empty line - exactly like the ">>"
+    // prompt in a console. Without it, block commands hang until timeout and
+    // the end marker below is never reached. Harmless for one-line commands.
+    full.push_back('\n');
+
     // End marker carries the command's $? status as a trailing digit ("...>>>1" / "...>>>0"),
     // read before WriteLine itself resets it. Parsed by tryFinalizeCommand_().
     full += "[Console]::Out.WriteLine(" + virtualshell::helpers::parsers::ps_quote(end) + " + [string][int]$?)\n";

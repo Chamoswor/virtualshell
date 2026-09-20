@@ -14,6 +14,7 @@ based on the actual value, never on guessed schema types.
 """
 from __future__ import annotations
 
+import base64
 import itertools
 import json
 import re
@@ -230,8 +231,8 @@ foreach ($__vs_g in $__vs_groups) {{
     }})
     $__vs_meths += ,([pscustomobject]@{{ n = $__vs_g.Name; o = $__vs_ovl }})
 }}
-$__vs_sm = @($__vs_o.PSObject.Methods |
-    Where-Object {{ $_.MemberType -eq 'ScriptMethod' }} |
+$__vs_sm = @($__vs_o.PSObject.Members |
+    Where-Object {{ $_.MemberType -in @('ScriptMethod', 'ParameterizedProperty') }} |
     ForEach-Object {{ [pscustomobject]@{{ n = $_.Name }} }})
 [pscustomobject]@{{
     tn = $__vs_o.PSObject.TypeNames[0]
@@ -532,6 +533,12 @@ class PsProxy:
                 return "[double]::NegativeInfinity"
             return repr(value)
         if isinstance(value, str):
+            if "\r" in value or "\n" in value:
+                # The stdin command stream normalizes line endings, so strings
+                # with control characters travel as base64 instead of literals.
+                b64 = base64.b64encode(value.encode("utf-8")).decode("ascii")
+                return ("[System.Text.Encoding]::UTF8.GetString("
+                        f"[System.Convert]::FromBase64String('{b64}'))")
             return _ps_quote(value)
         if isinstance(value, datetime):
             return (f"[datetime]::Parse({_ps_quote(value.isoformat())}, "

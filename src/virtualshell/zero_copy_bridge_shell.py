@@ -19,7 +19,7 @@ import tempfile
 import time
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any, List, Optional, TYPE_CHECKING, Union
+from typing import Any, List, Optional, TYPE_CHECKING, Union, overload
 
 from .ps_object import PSObject
 
@@ -387,10 +387,30 @@ class ZeroCopyBridge:
         )
         return all(r.success for r in results)
 
+    @overload
+    def receive(
+        self,
+        variable: str,
+        *,
+        timeout: float = 30.0,
+        depth: int = 1,
+    ) -> bytes:
+        ...
+
+    @overload
+    def receive(
+        self,
+        variable: str,
+        *,
+        timeout: float = 30.0,
+        return_memoryview: bool,
+        depth: int = 1,
+    ) -> memoryview:
+        ...
+
     # =========================================================================
     # POWERSHELL -> PYTHON
     # =========================================================================
-
     def receive(
         self,
         variable: str,

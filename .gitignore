@@ -13,3 +13,4 @@ test_performance_bridge.py
 ZEROCOPY_BRIDGE.md
 .vs/
 .pytest_cache/
+debug/

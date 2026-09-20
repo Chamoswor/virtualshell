@@ -43,6 +43,9 @@ class BatchProgressLike(Protocol):
     @property
     def frame_bytes(self) -> int: ...
 
+    def __init__(self) -> None:
+        ...
+
 @runtime_checkable
 class ConfigLike(Protocol):
     powershell_path: str = "pwsh"
@@ -61,28 +64,6 @@ class ConfigLike(Protocol):
     def __init__(self) -> None:
         ...
 
-@runtime_checkable
-class PsProxyLike(Protocol):
-    
-    # def_property_readonly oversettes til en @property i Python
-    @property
-    def type_name(self) -> str:
-        ...
-
-    def proxy_schema(self) -> dict[str, Any]:
-        ...
-
-    def proxy_multi_call(self, func: Callable[..., Any], *args: Any) -> List[Any]:
-            ...
-
-    def __getattr__(self, name: str) -> Any:
-        ...
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        ...
-
-    def __dir__(self) -> List[str]:
-        ...
 
 @runtime_checkable
 class VirtualShellLike(Protocol):

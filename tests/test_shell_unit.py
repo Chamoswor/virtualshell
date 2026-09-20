@@ -287,10 +287,53 @@ class TestConvenience:
         assert path.endswith("save-session.ps1")
         assert args == [str(sh.session_path)]
 
-    def test_make_proxy_forwards_arguments(self, fake_core):
+    def test_make_proxy_constructs_python_proxy(self, fake_core, monkeypatch):
+        import virtualshell.ps_proxy as ps_proxy_module
+
+        created = {}
+
+        class StubProxy:
+            def __init__(self, shell, type_name, object_ref):
+                created["args"] = (shell, type_name, object_ref)
+
+        monkeypatch.setattr(ps_proxy_module, "PsProxy", StubProxy)
         sh = Shell(cpp_module=fake_core).start()
-        sh.make_proxy("System.IO.FileInfo", "$file")
-        assert ("make_proxy", "System.IO.FileInfo", "$file", 2) in fake_core.last_shell.calls
+        proxy = sh.make_proxy("System.IO.FileInfo", "$file")
+        assert isinstance(proxy, StubProxy)
+        assert created["args"] == (sh, "System.IO.FileInfo", "$file")
+
+    def test_make_proxy_accepts_generated_protocol_class(self, fake_core, monkeypatch):
+        import virtualshell.ps_proxy as ps_proxy_module
+
+        created = {}
+
+        class StubProxy:
+            def __init__(self, shell, type_name, object_ref):
+                created["args"] = (type_name, object_ref)
+
+        class StringBuilder:  # shaped like generate_psobject output
+            __ps_type_name__ = "System.Text.StringBuilder"
+            __ps_expression__ = "[System.Text.StringBuilder]::new()"
+
+        monkeypatch.setattr(ps_proxy_module, "PsProxy", StubProxy)
+        sh = Shell(cpp_module=fake_core).start()
+
+        # Default: recreate the object from the embedded expression.
+        sh.make_proxy(StringBuilder)
+        assert created["args"] == ("System.Text.StringBuilder",
+                                   "[System.Text.StringBuilder]::new()")
+
+        # Explicit obj_ref binds an existing variable instead.
+        sh.make_proxy(StringBuilder, "$existing")
+        assert created["args"] == ("System.Text.StringBuilder", "$existing")
+
+    def test_make_proxy_rejects_class_without_metadata(self, fake_core):
+        class Naked:
+            pass
+
+        sh = Shell(cpp_module=fake_core).start()
+        with pytest.raises(TypeError, match="metadata"):
+            sh.make_proxy(Naked)
 
     def test_repr_reflects_running_state(self, fake_core):
         sh = Shell(cpp_module=fake_core)

@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "helpers.hpp"
 #include "virtual_shell.hpp"
 
 using virtualshell::core::Config;

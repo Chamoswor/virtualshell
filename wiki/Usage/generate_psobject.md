@@ -25,10 +25,10 @@ Running this snippet writes `WebClient.py`, containing a protocol definition tha
 1. **Starts the shell if required:** When you call `generate_psobject`, the backing PowerShell host is started automatically if it is not already running. The shell will be stopped after generation if it was started implicitly.
 2. **Normalises output:** The helper sets `$PSStyle.OutputRendering = 'PlainText'` and enables UTF-8 output so JSON parsing succeeds on any locale.
 3. **Materialises the object:** The given expression is tried as-is, as a variable lookup, via `New-Object`, `[Type]::new()`, and `[Type]::New()` variants (including argument forwarding when you pass a call expression). It also attempts COM instantiation for qualified type names.
-4. **Collects metadata:** Once an object is available, the helper executes `Get-Member`, converts the results to JSON, and derives method/property metadata.
-5. **Renders a protocol:** A minimal Python module is generated with imports, type annotations, and method/property signatures derived from the PowerShell metadata.
+4. **Collects metadata:** Once an object is available, the helper executes `Get-Member -InputObject` (so collections report their own members), converts the results to JSON, and derives method/property metadata.
+5. **Renders a protocol:** A minimal Python module is generated with imports, type annotations, and method/property signatures. Property types are derived from the member definitions, so `int Year {get;}` becomes `def Year(self) -> int`. Overloaded .NET methods are emitted as `@typing.overload` groups, so both `sb.Append("x")` and `sb.Append("x", 3)` type-check.
 
-If all strategies fail to materialise an object, you will see a summary of attempted expressions to aid troubleshooting.
+If all strategies fail to materialise an object, a `RuntimeError` is raised listing every attempted expression and its error.
 
 ## Customising Behaviour
 
@@ -46,12 +46,16 @@ from virtualshell import Shell
 
 shell = Shell().start()
 
-proxy = shell.make_proxy("System.Net.WebClient")
-client: WebClient = proxy  # type checker now knows the shape
+client = shell.make_proxy(WebClient)  # created and typed in one call
 print(client.BaseAddress)
 
 shell.stop()
 ```
+
+Generated classes embed ``__ps_type_name__`` and ``__ps_expression__``
+metadata, which is what lets `make_proxy(WebClient)` recreate the object
+without repeating the PowerShell expression. Pass an explicit variable to
+bind instead: `shell.make_proxy(WebClient, "$client")`.
 
 The protocol only describes the members discovered at generation time. If the PowerShell type changes or you need a different view, rerun `generate_psobject` with the updated command.
 

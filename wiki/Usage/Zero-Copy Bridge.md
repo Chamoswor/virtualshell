@@ -28,8 +28,7 @@ This approach has significant overhead for large data. The Zero-Copy Bridge elim
 ❌ **Not ideal for:**
 - Small strings or simple values (use regular `shell.run()`)
 - One-time transfers
-- Cross-platform code (use standard Shell methods)
-- Systems without admin rights to install DLL
+- Live object manipulation (use [`make_proxy`](make_proxy.md), which itself uses the bridge for binary data)
 
 ## Basic Usage
 
@@ -38,11 +37,17 @@ This approach has significant overhead for large data. The Zero-Copy Bridge elim
 ```python
 from virtualshell import Shell, ZeroCopyBridge, PSObject
 
-# Create shell and bridge (automatically generates unique channel name)
+# Create shell and bridge (a unique channel file is created in the temp dir)
 with Shell(timeout_seconds=60) as shell:
     with ZeroCopyBridge(shell, frame_mb=64, chunk_mb=4) as bridge:
         # Use bridge here
         pass
+```
+
+Alternatively, use the shell's shared bridge — created lazily on first use and closed automatically by `shell.stop()`:
+
+```python
+bridge = shell.zero_copy_bridge()   # one shared instance per Shell
 ```
 
 ### PowerShell → Python (Recommended Pattern)
@@ -222,12 +227,13 @@ with Shell() as shell:
 
 ```python
 bridge = ZeroCopyBridge(
-    shell,              # Shell instance
+    shell,              # Shell instance (started automatically if needed)
     frame_mb=64,        # Memory size per direction (MB)
     chunk_mb=4,         # Chunk size for transfers (MB)
-    scope="Local"       # "Local" or "Global" scope
 )
 ```
+
+A legacy `scope` parameter is still accepted but ignored (it belonged to the old Windows-only named-object transport).
 
 ### Methods
 
@@ -270,9 +276,13 @@ bridge.deserialize("myBytes", out_var="restoredObject")
 
 **Returns:** `bool` - True if successful
 
-#### `receive(variable, *, timeout=30.0, return_memoryview=False)`
+#### `receive(variable, *, timeout=30.0, return_memoryview=False, depth=1)`
 
 Receive variable from PowerShell to Python (all-in-one operation).
+
+`byte[]` variables are transferred as-is. Any **other** value is serialized
+to CliXml by the PowerShell side automatically, so an explicit `serialize()`
+step is optional — parse the result with `PSObject.from_bytes`.
 
 ```python
 # Receive as bytes (default)
@@ -280,12 +290,16 @@ data = bridge.receive("myData")
 
 # Receive as memoryview (zero-copy)
 data_view = bridge.receive("myData", return_memoryview=True)
+
+# Receive a non-byte object directly (auto CliXml)
+obj = PSObject.from_bytes(bridge.receive("myObject", depth=2))
 ```
 
 **Parameters:**
 - `variable`: PowerShell variable name
 - `timeout`: Timeout in seconds
 - `return_memoryview`: If True, return memoryview (zero-copy)
+- `depth`: PSSerializer depth for the automatic CliXml path
 
 **Returns:** `bytes` or `memoryview`
 
@@ -602,7 +616,8 @@ except Exception as e:
 - **Same machine** - Cannot transfer between remote machines
 - **Memory constraints** - Frame size limits maximum transfer size
 - **Serialization limits** - Some PowerShell types cannot be serialized (COM objects, FileStreams, PSCredentials, etc.)
-- **Execution policy** - Automatically set to Bypass (may conflict with strict policies)
+- **One bridge per Shell** - The PowerShell side holds a single channel per session; use `shell.zero_copy_bridge()` (or one `ZeroCopyBridge` at a time) rather than several bridges on the same shell
+- **Execution policy** - Set to Bypass for the session on Windows (may conflict with strict policies)
 
 ## Troubleshooting
 
