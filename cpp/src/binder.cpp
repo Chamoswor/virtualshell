@@ -1,12 +1,109 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
-#include <vector>
+#include <functional>
+#include <map>
 #include <memory>
+#include <string>
+#include <vector>
 #include "../include/virtual_shell.hpp"
 #include "../include/py_bridge.hpp"
 
 namespace py = pybind11;
+
+namespace {
+
+// The async bindings are plain free functions bound by pointer rather than
+// lambdas: MSVC 14.51 (VS 2026) hits an internal compiler error (C1001) when
+// instantiating pybind11::cpp_function over complex lambdas with
+// default-argument packs. Function pointers take a simpler instantiation
+// path, and keeping the callback machinery in ordinary function bodies keeps
+// it out of the template tree entirely.
+
+py::object execute_async_py(std::shared_ptr<VirtualShell> self,
+                            std::string command,
+                            py::object callback /* may be None */,
+                            double timeout_seconds) {
+    auto fut = self->executeAsync(std::move(command), /*cb*/ nullptr, timeout_seconds);
+    return virtualshell::pybridge::make_py_future_from_std_future(std::move(fut), std::move(callback));
+}
+
+std::function<void(const VirtualShell::BatchProgress&)>
+make_progress_dispatcher(py::object progress_cb /* may be None */) {
+    if (progress_cb.is_none()) {
+        return {};
+    }
+    // GIL-safe lifecycle for callback object
+    // Dev note: Custom deleter ensures proper Python object cleanup during shutdown
+    auto pcb = std::shared_ptr<py::object>(
+        new py::object(std::move(progress_cb)),
+        [](py::object* p) {
+            if (!p) return;
+            if (virtualshell::pybridge::interpreter_down()) { p->release(); delete p; return; }
+            delete p;
+        });
+    return [pcb](const VirtualShell::BatchProgress& p) {
+        if (virtualshell::pybridge::interpreter_down()) return;
+        virtualshell::pybridge::PyDispatcher::inst().post(
+            [pcb, p]() mutable {
+                try {
+                    py::object py_p = py::cast(p);
+                    (*pcb)(py_p);
+                } catch (py::error_already_set& e) {
+                    e.discard_as_unraisable("progress_callback");
+                } catch (...) {
+                    // swallow
+                }
+            });
+    };
+}
+
+py::object execute_async_batch_py(std::shared_ptr<VirtualShell> self,
+                                  std::vector<std::string> commands,
+                                  py::object progress_cb /* may be None */,
+                                  bool stop_on_first_error,
+                                  double per_command_timeout_seconds) {
+    auto fut = self->executeAsync_batch(
+        std::move(commands),
+        make_progress_dispatcher(std::move(progress_cb)),
+        stop_on_first_error,
+        per_command_timeout_seconds);
+    return virtualshell::pybridge::make_py_future_from_std_future(std::move(fut), py::none());
+}
+
+py::object execute_async_script_py(std::shared_ptr<VirtualShell> self,
+                                   std::string script_path,
+                                   std::vector<std::string> args,
+                                   py::object callback /* may be None */,
+                                   double timeout_seconds,
+                                   bool dot_source,
+                                   bool /*raise_on_error*/) {
+    auto fut = self->executeAsync_script(
+        std::move(script_path),
+        std::move(args),
+        timeout_seconds,
+        dot_source,
+        /*raiseOnError*/ false,
+        /*cb*/ nullptr);
+    return virtualshell::pybridge::make_py_future_from_std_future(std::move(fut), std::move(callback));
+}
+
+py::object execute_async_script_kv_py(std::shared_ptr<VirtualShell> self,
+                                      std::string script_path,
+                                      std::map<std::string, std::string> named_args,
+                                      double timeout_seconds,
+                                      bool dot_source,
+                                      bool /*raise_on_error*/) {
+    auto fut = self->executeAsync_script_kv(
+        std::move(script_path),
+        std::move(named_args),
+        timeout_seconds,
+        dot_source,
+        /*raiseOnError*/ false);
+    return virtualshell::pybridge::make_py_future_from_std_future(std::move(fut), py::none());
+}
+
+} // namespace
 
 // -------------------- Module --------------------
 PYBIND11_MODULE(_core, m) {
@@ -100,64 +197,14 @@ PYBIND11_MODULE(_core, m) {
              "Execute script with named parameters via hashtable splatting")
 
         // Async: single
-        .def("execute_async",
-             [](std::shared_ptr<VirtualShell> self,
-                std::string command,
-                py::object callback /* = None */,
-                double timeout_seconds = 0.0) {
-                 auto fut = self->executeAsync(std::move(command),/*cb*/ nullptr, timeout_seconds);
-                 return virtualshell::pybridge::make_py_future_from_std_future(std::move(fut), std::move(callback));
-             },
+        .def("execute_async", &execute_async_py,
              py::arg("command"),
              py::arg("callback") = py::none(),
              py::arg("timeout_seconds") = 0.0,
              "Execute a PowerShell command asynchronously and return a Python Future")
 
         // Async: batch
-        .def("execute_async_batch",
-             [](std::shared_ptr<VirtualShell> self,
-                std::vector<std::string> commands,
-                py::object progress_cb /* = None */,
-                bool stop_on_first_error,
-                double per_command_timeout_seconds) {
-
-                 std::function<void(const VirtualShell::BatchProgress&)> cpp_cb;
-                 if (!progress_cb.is_none()) {
-                     // GIL-safe lifecycle for callback object
-                     // Dev note: Custom deleter ensures proper Python object cleanup during shutdown
-                     auto pcb = std::shared_ptr<py::object>(
-                         new py::object(progress_cb),
-                         [](py::object* p){
-                             if (!p) return;
-                             if (virtualshell::pybridge::interpreter_down()) { p->release(); delete p; return; }
-                             delete p;
-                         }
-                     );
-                    cpp_cb = [pcb](const VirtualShell::BatchProgress& p) {
-                        if (virtualshell::pybridge::interpreter_down()) return;
-                        virtualshell::pybridge::PyDispatcher::inst().post(
-                            [pcb, p]() mutable {
-                                try {
-                                    py::object py_p = py::cast(p);
-                                    (*pcb)(py_p);
-                                } catch (py::error_already_set& e) {
-                                    e.discard_as_unraisable("progress_callback");
-                                } catch (...) {
-                                    // swallow
-                                }
-                            }
-                        );
-                    };
-                 }
-
-                 auto fut = self->executeAsync_batch(
-                     std::move(commands),
-                     cpp_cb,
-                     stop_on_first_error,
-                     per_command_timeout_seconds
-                 );
-                 return virtualshell::pybridge::make_py_future_from_std_future(std::move(fut), py::none());
-             },
+        .def("execute_async_batch", &execute_async_batch_py,
              py::arg("commands"),
              py::arg("progress_callback") = py::none(),
              py::arg("stop_on_first_error") = true,
@@ -165,24 +212,7 @@ PYBIND11_MODULE(_core, m) {
              "Execute a batch asynchronously (returns Future[List[ExecutionResult]])")
 
         // Async: script
-        .def("execute_async_script",
-             [](std::shared_ptr<VirtualShell> self,
-                std::string script_path,
-                std::vector<std::string> args,
-                py::object callback /* = None */,
-                double timeout_seconds,
-                bool dot_source,
-                bool /*raise_on_error*/) {
-                 auto fut = self->executeAsync_script(
-                     std::move(script_path),
-                     std::move(args),
-                     timeout_seconds,
-                     dot_source,
-                     /*raiseOnError*/ false,
-                     /*cb*/ nullptr
-                 );
-                 return virtualshell::pybridge::make_py_future_from_std_future(std::move(fut), std::move(callback));
-             },
+        .def("execute_async_script", &execute_async_script_py,
              py::arg("script_path"),
              py::arg("args") = std::vector<std::string>{},
              py::arg("callback") = py::none(),
@@ -191,22 +221,7 @@ PYBIND11_MODULE(_core, m) {
              py::arg("raise_on_error") = false)
 
         // Async: script_kv
-        .def("execute_async_script_kv",
-             [](std::shared_ptr<VirtualShell> self,
-                std::string script_path,
-                std::map<std::string,std::string> named_args,
-                double timeout_seconds,
-                bool dot_source,
-                bool /*raise_on_error*/) {
-                 auto fut = self->executeAsync_script_kv(
-                     std::move(script_path),
-                     std::move(named_args),
-                     timeout_seconds,
-                     dot_source,
-                     /*raiseOnError*/ false
-                 );
-                 return virtualshell::pybridge::make_py_future_from_std_future(std::move(fut), py::none());
-             },
+        .def("execute_async_script_kv", &execute_async_script_kv_py,
              py::arg("script_path"),
              py::arg("named_args"),
              py::arg("timeout_seconds") = 0.0,
