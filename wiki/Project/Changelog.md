@@ -1,7 +1,7 @@
 ### Page: Changelog
 
 ```
-## Unreleased
+## 1.2.2
 - Windows PowerShell 5.1 support with the full feature set (sync/async execution,
   scripts, session snapshots, zero-copy bridge, proxies, generate_psobject)
 - New `powershell_edition` option ("auto" | "core" | "desktop") on `Shell` and the
