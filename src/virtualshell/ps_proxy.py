@@ -1059,6 +1059,17 @@ class PsProxy:
         s = self._schema
         return "GetEnumerator" in s.methods or ("Count" in s.properties and "Item" in s.methods)
 
+    def _enumeration_source(self) -> str:
+        """PowerShell expression yielding the elements as an array."""
+        s = self._schema
+        if self._is_mapping_like():
+            return f"@({self._ref}.Values)"
+        if "GetEnumerator" in s.methods:
+            return f"@({self._ref})"
+        # Count + Item indexer without IEnumerable: walk it by index.
+        return (f"@(for ($__vs_i = 0; $__vs_i -lt {self._ref}.Count; $__vs_i++) "
+                f"{{ {self._ref}.Item($__vs_i) }})")
+
     def _not_a_collection(self) -> TypeError:
         return TypeError(f"{self._schema.type_name} proxy is not a collection "
                          "(no IEnumerable, and no Count + Item indexer)")
@@ -1372,11 +1383,13 @@ class PsProxy:
                     types=type_list, ntypes=len(type_names), nargs=len(args)).splitlines()
             target = "$null" if self._static else self._ref
             arg_array = "[object[]]@(" + ", ".join(ps_args) + ")"
-            # $( ) : an if-statement is not an expression in Windows PowerShell 5.1.
-            call = (f"$(if (${var}.IsStatic) {{ ${var}.Invoke($null, {arg_array}) }} "
-                    f"else {{ ${var}.Invoke({target}, {arg_array}) }})")
+            # Invoke inside a statement, not a $( ) subexpression: that would
+            # unroll an array result (an empty array would become $null).
+            prelude.append(
+                f"if (${var}.IsStatic) {{ $__vs_gr = ${var}.Invoke($null, {arg_array}) }} "
+                f"else {{ $__vs_gr = ${var}.Invoke({target}, {arg_array}) }}")
             label = f"Call {self._schema.type_name}.{name}<{','.join(type_names)}>"
-            result = self._fetch_value(call, label=label, prelude=prelude)
+            result = self._fetch_value("$__vs_gr", label=label, prelude=prelude)
             if cache is not None:
                 cache[key] = var
             return result
@@ -1410,7 +1423,7 @@ class PsProxy:
             f"        $__vs_row[{_ps_quote(key)}] = $(try {{ & $__vs_cell ($__vs_e.{expr}) }}"
             f" catch {{ $null }})"
             for key, expr in columns)
-        source = f"@({self._ref}.Values)" if self._is_mapping_like() else f"@({self._ref})"
+        source = self._enumeration_source() if self._is_collection() else f"@({self._ref})"
         script = _SELECT_SCRIPT.format(source=source, cells=cells)
         out = self._run(script, label=f"proxy_select on {self._schema.type_name}")
         if not out:
