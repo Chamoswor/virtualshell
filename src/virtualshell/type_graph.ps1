@@ -58,8 +58,8 @@ function Get-VsTypeGraph {
         if ($t.IsGenericType) {
             $def = $t.GetGenericTypeDefinition().FullName
             if (-not $def) { $def = $t.Name }
-            $args = @($t.GetGenericArguments() | ForEach-Object { Format-TypeName $_ }) -join ','
-            return "$def[$args]"
+            $_args = @($t.GetGenericArguments() | ForEach-Object { Format-TypeName $_ }) -join ','
+            return "$def[$_args]"
         }
         $n = $t.FullName
         if (-not $n) { $n = $t.Name }
