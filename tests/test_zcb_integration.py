@@ -18,6 +18,15 @@ from conftest import integration
 pytestmark = integration
 
 
+# SHA-256 through .NET directly: Get-FileHash is an autoloaded script function
+# in Windows PowerShell 5.1, and 5.1's module analysis cache can fail
+# transiently when many hosts start close together (as this suite does),
+# which surfaced as "Get-FileHash is not recognized".
+_SHA256 = ("[System.BitConverter]::ToString("
+           "[System.Security.Cryptography.SHA256]::Create().ComputeHash($%s)"
+           ").Replace('-', '')")
+
+
 @pytest.fixture(scope="module")
 def shell(edition):
     from virtualshell import Shell
@@ -47,12 +56,11 @@ class TestPythonToPowerShell:
     def test_large_multi_chunk_content_integrity(self, shell, bridge):
         payload = os.urandom(3 * 1024 * 1024 + 12345)  # > 3 chunks at 1 MB
         bridge.send(payload, "vs_big")
-        ps_hash = shell.run(
-            "(Get-FileHash -InputStream ([IO.MemoryStream]::new($vs_big)) "
-            "-Algorithm SHA256).Hash",
-            timeout=60,
-        ).out.strip().lower()
-        assert ps_hash == hashlib.sha256(payload).hexdigest()
+        res = shell.run(_SHA256 % "vs_big", timeout=60)
+        ps_hash = res.out.strip().lower()
+        assert ps_hash == hashlib.sha256(payload).hexdigest(), (
+            f"success={res.success} exit={res.exit_code} err={res.err[:300]!r} "
+            f"t={res.execution_time:.3f}")
 
     def test_empty_payload(self, shell, bridge):
         bridge.send(b"", "vs_empty")
@@ -88,13 +96,12 @@ class TestPowerShellToPython:
             raise_on_error=True, timeout=60,
         )
         data = bridge.receive("vs_rand", timeout=60)
-        ps_hash = shell.run(
-            "(Get-FileHash -InputStream ([IO.MemoryStream]::new($vs_rand)) "
-            "-Algorithm SHA256).Hash",
-            timeout=60,
-        ).out.strip().lower()
+        res = shell.run(_SHA256 % "vs_rand", timeout=60)
+        ps_hash = res.out.strip().lower()
         assert len(data) == 3145728
-        assert hashlib.sha256(data).hexdigest() == ps_hash
+        assert hashlib.sha256(data).hexdigest() == ps_hash, (
+            f"success={res.success} exit={res.exit_code} err={res.err[:300]!r} "
+            f"t={res.execution_time:.3f}")
 
     def test_receive_returns_memoryview_when_asked(self, shell, bridge):
         shell.run("$vs_mv = [byte[]](1,2,3)", raise_on_error=True)

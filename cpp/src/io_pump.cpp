@@ -71,13 +71,18 @@ IoPump& IoPump::operator=(IoPump&& other) noexcept {
     return *this;
 }
 
-void IoPump::start(Process& process, ChunkHandler handler) {
+void IoPump::start(Process& process, ChunkHandler handler, ExitHandler exit_handler) {
     std::lock_guard<std::mutex> guard(lifecycle_mutex_);
 
     stop_locked_();
 
     process_ = &process;
-    handler_ = std::move(handler);
+    {
+        std::lock_guard<std::mutex> lock(handler_mutex_);
+        handler_ = std::move(handler);
+        exit_handler_ = std::move(exit_handler);
+    }
+    exit_notified_.store(false, std::memory_order_release);
 
     // Mark the pump active before we spin up threads so they observe the flag.
     running_.store(true, std::memory_order_release);
@@ -112,14 +117,13 @@ void IoPump::drain() {
 }
 
 void IoPump::stop_locked_() {
-    if (!running_.exchange(false, std::memory_order_acq_rel)) {
-        handler_ = nullptr;
-        process_ = nullptr;
-        clear_write_queue_();
-        return;
-    }
+    running_.store(false, std::memory_order_release);
 
     // Signal the child to close pipes so reader threads unblock cleanly.
+    // When the child already died, the readers left on EOF and cleared
+    // running_ themselves, but their std::thread objects are still joinable
+    // and must be joined below regardless: destroying a joinable thread
+    // calls std::terminate.
     if (process_) {
         process_->shutdown_streams();
     }
@@ -131,7 +135,11 @@ void IoPump::stop_locked_() {
     join_if_joinable(writer_thread_);
 
     clear_write_queue_();
-    handler_ = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(handler_mutex_);
+        handler_ = nullptr;
+        exit_handler_ = nullptr;
+    }
     process_ = nullptr;
 }
 
@@ -168,6 +176,17 @@ void IoPump::reader_loop_(bool is_stderr) {
 
     running_.store(false, std::memory_order_release);
     write_cv_.notify_all();
+
+    // Both readers end here; the owner hears about it once.
+    if (!exit_notified_.exchange(true, std::memory_order_acq_rel)) {
+        if (auto on_exit = exit_handler_snapshot_()) {
+            try {
+                on_exit();
+            } catch (...) {
+                // Never let owner errors escape a pump thread.
+            }
+        }
+    }
 }
 
 void IoPump::writer_loop_() {
@@ -227,6 +246,11 @@ void IoPump::clear_write_queue_() {
 IoPump::ChunkHandler IoPump::handler_snapshot_() {
     std::lock_guard<std::mutex> lock(handler_mutex_);
     return handler_;
+}
+
+IoPump::ExitHandler IoPump::exit_handler_snapshot_() {
+    std::lock_guard<std::mutex> lock(handler_mutex_);
+    return exit_handler_;
 }
 
 } // namespace core

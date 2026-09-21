@@ -63,6 +63,7 @@ VirtualShell::VirtualShell(VirtualShell&& other) noexcept
     resolvedPowerShellPath_ = std::move(other.resolvedPowerShellPath_);
 
     seq_.store(other.seq_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    processExited_.store(other.processExited_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     inflightCount_.store(other.inflightCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     highWater_.store(other.highWater_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     pendingTimeoutSentinels_.store(other.pendingTimeoutSentinels_.load(std::memory_order_relaxed),
@@ -113,6 +114,7 @@ VirtualShell& VirtualShell::operator=(VirtualShell&& other) noexcept {
     resolvedPowerShellPath_ = std::move(other.resolvedPowerShellPath_);
 
     seq_.store(other.seq_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    processExited_.store(other.processExited_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     inflightCount_.store(other.inflightCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     highWater_.store(other.highWater_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     pendingTimeoutSentinels_.store(other.pendingTimeoutSentinels_.load(std::memory_order_relaxed),
@@ -179,7 +181,13 @@ void VirtualShell::restoreFromSnapshot_(const std::string& restoreScriptPath,
 
 bool VirtualShell::start() {
     if (isRunning_) {
-        return false;
+        if (!processExited_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        // The previous host died on its own: join its threads and release its
+        // handles before launching a replacement.
+        VSHELL_DBG("LIFECYCLE", "start() cleaning up a dead host before relaunch");
+        stop(true);
     }
 
     // An explicit path wins; otherwise pick pwsh / powershell.exe by edition.
@@ -206,11 +214,12 @@ bool VirtualShell::start() {
         return false;
     }
 
+    processExited_.store(false, std::memory_order_release);
     try {
         // Start pumping stdout/stderr so we can parse markers emitted by build_pwsh_packet().
-        io_pump_.start(*process, [this](bool isErr, std::string_view chunk) {
-            onChunk_(isErr, chunk);
-        });
+        io_pump_.start(*process,
+            [this](bool isErr, std::string_view chunk) { onChunk_(isErr, chunk); },
+            [this]() { onProcessExited_(); });
     } catch (...) {
         process->terminate();
         throw;
@@ -268,6 +277,8 @@ void VirtualShell::stop(bool force) {
     }
 
     lifecycleGate_.store(true, std::memory_order_release);
+    // From here on the pipes reaching EOF is our own doing, not a crash.
+    stopping_.store(true, std::memory_order_release);
 
     VSHELL_DBG("LIFECYCLE", "stop(force=%d)", int(force));
 
@@ -330,7 +341,36 @@ void VirtualShell::stop(bool force) {
 
     process_.reset();
     isRunning_.store(false, std::memory_order_release);
+    processExited_.store(false, std::memory_order_release);
+    stopping_.store(false, std::memory_order_release);
     lifecycleGate_.store(false, std::memory_order_release);
+}
+
+void VirtualShell::onProcessExited_() {
+    if (stopping_.load(std::memory_order_acquire)) {
+        return; // stop() closed the pipes itself.
+    }
+    if (processExited_.exchange(true, std::memory_order_acq_rel)) {
+        return; // stdout and stderr both report EOF; act on the first only.
+    }
+
+    VSHELL_DBG("LIFECYCLE", "host process exited unexpectedly");
+
+    // Fail everything in flight right away rather than letting each command
+    // run out its timeout. Captured stderr (e.g. a .NET crash message) is kept
+    // in front of our own note so the caller sees why the host died.
+    std::lock_guard<std::mutex> lk(stateMx_);
+    for (auto& kv : inflight_) {
+        CmdState& state = *kv.second;
+        if (!state.done.load(std::memory_order_acquire)) {
+            state.processExited.store(true, std::memory_order_release);
+            state.errBuf.append("PowerShell process exited unexpectedly.\n");
+            completeCmdLocked_(state, /*success=*/false);
+        }
+    }
+    inflight_.clear();
+    inflightOrder_.clear();
+    inflightCount_.store(0, std::memory_order_relaxed);
 }
 
 bool VirtualShell::waitForProcess_(int timeoutMs) {
@@ -354,7 +394,7 @@ bool VirtualShell::waitForProcess_(int timeoutMs) {
 }
 
 bool VirtualShell::isAlive() const {
-    if (!isRunning_) {
+    if (!isRunning_ || processExited_.load(std::memory_order_acquire)) {
         return false;
     }
     if (!process_) {
@@ -1033,6 +1073,9 @@ VirtualShell::submit(std::string command, double timeoutSeconds,
     if (!isRunning_) {
         return makeErrorFuture_(-3, "PowerShell process is not running");
     }
+    if (processExited_.load(std::memory_order_acquire)) {
+        return makeErrorFuture_(-3, "PowerShell process exited unexpectedly; call start() to relaunch it");
+    }
 
     const uint64_t id = nextCommandId_();
     auto state = createCmdState_(id, timeoutSeconds, std::move(cb));
@@ -1310,8 +1353,13 @@ void VirtualShell::completeCmdLocked_(CmdState& S, bool success) {
     ExecutionResult r{};
     const bool timedOut = S.timedOut.load(std::memory_order_acquire);
     const bool interrupted = S.restartInterrupted.load(std::memory_order_acquire);
+    const bool hostDied = S.processExited.load(std::memory_order_acquire);
 
-    if (interrupted) {
+    if (hostDied) {
+        // The host is gone: same code as "not running" so callers see one state.
+        r.success = false;
+        r.exitCode = -3;
+    } else if (interrupted) {
         r.success = false;
         r.exitCode = -2;
     } else if (!success || timedOut) {

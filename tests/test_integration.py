@@ -8,6 +8,8 @@ still run on machines without a toolchain.
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
 
 import pytest
@@ -166,3 +168,63 @@ class TestSeparateInstances:
         assert session_path.exists()
         sh.stop()
         assert not session_path.exists()
+
+
+class TestHostCrash:
+    """The PowerShell host dies on its own (here: it kills itself).
+
+    Before the fix, the in-flight command waited for its whole timeout and the
+    interpreter later aborted in the engine's teardown (exit code 3).
+    """
+
+    def test_crash_fails_fast_and_start_recovers(self, edition):
+        from virtualshell import ExitCode, Shell
+
+        sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+        try:
+            t0 = time.time()
+            res = sh.run("Stop-Process -Id $PID -Force")
+            assert not res.success
+            assert res.exit_code == ExitCode.NOT_RUNNING
+            assert "exited unexpectedly" in res.err
+            assert time.time() - t0 < 10          # not the 30 s timeout
+            assert not sh.is_running
+
+            rejected = sh.run("1 + 1")
+            assert rejected.exit_code == ExitCode.NOT_RUNNING
+
+            sh.start()                            # relaunch, no stop() needed
+            assert sh.is_running
+            assert sh.run("40 + 2").out.strip() == "42"
+        finally:
+            sh.stop(force=True)
+
+    def test_crash_during_initial_commands_returns_promptly(self, edition):
+        from virtualshell import Shell
+
+        t0 = time.time()
+        sh = Shell(timeout_seconds=30, powershell_edition=edition,
+                   initial_commands=["Stop-Process -Id $PID -Force"])
+        sh.start()
+        assert time.time() - t0 < 10
+        assert not sh.is_running
+        sh.stop()
+
+    def test_interpreter_exits_cleanly_after_host_crash(self, edition):
+        # Run in a subprocess: the old bug was an abort during interpreter
+        # shutdown, which no in-process assertion can observe.
+        script = (
+            "from virtualshell import Shell\n"
+            f"sh = Shell(timeout_seconds=30, powershell_edition={edition!r},\n"
+            "           initial_commands=['Stop-Process -Id $PID -Force'])\n"
+            "sh.start()\n"
+            "r = sh.run('1 + 1')\n"
+            "print('exit_code', r.exit_code)\n"
+            "sh.stop()\n"
+            "print('clean exit')\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                              text=True, timeout=120)
+        assert proc.returncode == 0, proc.stderr
+        assert "exit_code -3" in proc.stdout
+        assert "clean exit" in proc.stdout

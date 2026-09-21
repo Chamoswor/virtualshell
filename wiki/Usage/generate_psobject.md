@@ -36,6 +36,115 @@ If all strategies fail to materialise an object, a `RuntimeError` is raised list
 - **PowerShell host:** Use `Shell(powershell_edition="core")` / `"desktop"` to pick pwsh or Windows PowerShell 5.1, or `Shell(powershell_path="C:/Program Files/PowerShell/7/pwsh.exe")` to reference a specific installation.
 - **Result stripping:** `strip_results=True` trims trailing whitespace from PowerShell output; it is optional but helpful for clean JSON parsing.
 
+## Rebuilding the Object in a New Session
+
+The generated class carries everything `Shell.make_proxy(GeneratedClass)`
+needs to recreate the object, so a stub generated once works in any later
+session:
+
+| Attribute | Meaning |
+|-----------|---------|
+| `__ps_type_name__` | The reflected type name. |
+| `__ps_expression__` | The PowerShell expression that creates the object. For a `$variable` input this becomes `[Type]::new()` when the type has a parameterless constructor; otherwise the variable name is kept and `make_proxy` can only bind an existing object. Pass `expression=` to embed a real creation expression. |
+| `__ps_assembly__`, `__ps_assembly_name__` | Present only for types outside the .NET runtime (vendor SDKs). `make_proxy` loads the assembly first and registers its directory with a process-wide `AssemblyResolve` probe so its dependencies resolve. |
+
+**Derived objects.** Many SDK types have no constructor at all; you only get
+them from a parent (`$tia.Projects`, `$project.Devices`, ...). Every proxy
+remembers the expression it was reached by (`proxy.ps_origin`), and
+`generate_psobject` accepts a proxy directly, so the stub records that path
+instead of a throw-away variable name:
+
+```python
+tia = sh.make_proxy(TiaPortal)             # or sh.make_proxy("", "$tia")
+projects = tia.Projects
+print(projects.ps_origin)                  # -> "$tia.Projects"
+sh.generate_psobject(projects, Path("ProjectComposition.py"))
+# __ps_expression__ = '$tia.Projects'  (also when passing projects.ps_ref)
+```
+
+`make_proxy(ProjectComposition)` then works in any session where `$tia`
+exists: the expression is evaluated once into a private variable. When the
+root was *created* rather than bound (`make_proxy(TiaPortal)` with no
+`obj_ref`), the recorded path starts from the creation expression, e.g.
+`([Siemens.Engineering.TiaPortal]::new(...)).Projects`, which recreates the
+root as well. Paths that involved bytes sent through the bridge or
+out-buffers are not reproducible from source text; `ps_origin` is `None`
+there and the stub falls back to the variable name.
+
+```python
+# Generate once, from a live object whose constructor needs arguments:
+shell.generate_psobject(
+    "$tia", Path("TiaPortal.py"),
+    expression="[Siemens.Engineering.TiaPortal]::new("
+               "[Siemens.Engineering.TiaPortalMode]::WithoutUserInterface)",
+)
+
+# Later, in a fresh session, no bootstrap needed:
+from TiaPortal import TiaPortal
+with Shell(powershell_edition="desktop") as sh:
+    tia = sh.make_proxy(TiaPortal)   # loads Siemens.Engineering.Base.dll, then creates
+```
+
+## Generating a Typed Package (`follow=True`)
+
+A single stub stops typing at object boundaries: `Projects` is `Any`, and
+so is what `Item(0)` returns. With `follow=True` the generator walks the
+**type graph** by reflection (no live instances needed, so an empty
+collection's `Item(index)` is still typed) and writes a *package*: one
+module per SDK type, each annotated with the others.
+
+```python
+shell.generate_psobject(
+    "$tia", Path("tia_sdk"), follow=True,
+    expression="[Siemens.Engineering.TiaPortal]::new("
+               "[Siemens.Engineering.TiaPortalMode]::WithoutUserInterface)",
+)
+```
+
+produces `tia_sdk/TiaPortal.py`, `tia_sdk/ProjectComposition.py`,
+`tia_sdk/Project.py`, ... and an `__init__.py` re-exporting them:
+
+```python
+class TiaPortal(Protocol):
+    @property
+    def Projects(self) -> ProjectComposition: ...
+    def GetCurrentProcess(self) -> TiaPortalProcess: ...
+
+class ProjectComposition(Protocol):
+    def Item(self, index: int) -> Project: ...
+    def Open(self, path: Any) -> Project: ...      # System.IO.FileInfo: runtime type
+```
+
+```python
+from tia_sdk import TiaPortal
+
+tia = sh.make_proxy(TiaPortal)
+project = tia.Projects.Item(0)      # typed Project, completion all the way down
+```
+
+Rules of the walk:
+
+- Only types outside the .NET runtime are followed (the SDK). Runtime types
+  map to Python scalars (`str`, `int`, `datetime.datetime`, ...) or `Any`;
+  enums map to `str`, which is what proxies return for them.
+- Generic collections map like the single-file generator: `IEnumerable<T>`
+  / `List<T>` become `List[T]`, dictionaries `Dict[K, V]`, `Nullable<T>`
+  `Optional[T]`, with `T` resolved to the generated class when followed.
+- Indexers (`this[int]`) become methods (`Item(index)`), overloads become
+  `@overload` groups; cross-module references are `TYPE_CHECKING` imports,
+  so importing the package never creates cycles at runtime.
+- `include_namespaces=["Siemens.Engineering"]` limits following to those
+  namespaces and the namespaces nested under them (`Siemens.Engineering.HW`,
+  `.SW`, ...); with an empty list every type outside the runtime is
+  followed. Useful when a vendor SDK drags in types you do not want stubs
+  for. `max_types` (default 2000) caps the walk.
+- Only the root module gets `__ps_expression__` (from `expression=`, the
+  proxy's `ps_origin`, or `[Type]::new()`). Other types are reached through
+  a parent; `make_proxy(Project)` without `obj_ref` raises `TypeError`
+  saying so. The root may also be a bare type literal
+  (`"[Siemens.Engineering.TiaPortal]"`) when no instance exists yet.
+- Every module carries `__ps_assembly__`, so any stub loads its SDK on use.
+
 ## Using the Generated Protocol
 
 After generation, import the new module and annotate your variables:

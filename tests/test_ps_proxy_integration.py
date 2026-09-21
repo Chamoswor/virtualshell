@@ -385,3 +385,79 @@ class TestStaticProxies:
         assert mb.type_name == "System.Windows.Forms.MessageBox"
         names = {x["Name"] for x in mb.proxy_schema()["Methods"]}
         assert "Show" in names
+
+
+def _load_module(path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestProvenance:
+    """Proxies remember how they were reached (ps_origin); stubs embed it."""
+
+    def test_root_origins(self, shell):
+        created = shell.make_proxy("", "System.Text.StringBuilder(32)")
+        assert created.ps_origin == "[System.Text.StringBuilder]::new(32)"
+        shell.run("$vs_prov_root = [System.Text.StringBuilder]::new()", raise_on_error=True)
+        bound = shell.make_proxy("", "$vs_prov_root")
+        assert bound.ps_origin == "$vs_prov_root"
+        static = shell.make_proxy("", "[System.Math]")
+        assert static.ps_origin == "[System.Math]"
+
+    def test_derived_origins_follow_members_and_calls(self, shell):
+        shell.run("$vs_prov_root = [System.Text.StringBuilder]::new()", raise_on_error=True)
+        root = shell.make_proxy("", "$vs_prov_root")
+        assert root.Append("x").ps_origin == "$vs_prov_root.Append('x')"
+        assert root.Append("y").Append(3).ps_origin == "($vs_prov_root.Append('y')).Append(3)"
+
+        created = shell.make_proxy("", "System.Text.StringBuilder(8)")
+        assert created.Append("z").ps_origin == \
+            "([System.Text.StringBuilder]::new(8)).Append('z')"
+
+        shell.run("$vs_prov_dir = [System.IO.DirectoryInfo]::new("
+                  "[System.IO.Path]::GetTempPath())", raise_on_error=True)
+        d = shell.make_proxy("", "$vs_prov_dir")
+        assert d.Root.ps_origin == "$vs_prov_dir.Root"
+
+    def test_origin_is_none_when_arguments_only_exist_as_temporaries(self, shell):
+        shell.run("$vs_prov_root = [System.Text.StringBuilder]::new()", raise_on_error=True)
+        root = shell.make_proxy("", "$vs_prov_root")
+        assert root.Append(b"\x01\x02").ps_origin is None      # bytes go via the bridge
+
+    def test_derived_expression_is_evaluated_once_into_own_variable(self, shell):
+        shell.run("$vs_prov_root = [System.Text.StringBuilder]::new()", raise_on_error=True)
+        derived = shell.make_proxy("", "$vs_prov_root.Append('q')")
+        assert derived.ps_ref.startswith("$__vs_proxy_")
+        assert derived.ps_origin == "$vs_prov_root.Append('q')"
+        _ = derived.Length; _ = derived.Length                  # no re-evaluation
+        assert shell.run("$vs_prov_root.ToString()").out.strip() == "q"
+
+    def test_generate_from_derived_proxy_embeds_origin(self, shell, tmp_path):
+        from virtualshell.generate_psobject import generate
+
+        shell.run("$vs_prov_root = [System.Text.StringBuilder]::new()", raise_on_error=True)
+        root = shell.make_proxy("", "$vs_prov_root")
+        derived = root.Append("ab")
+
+        out = tmp_path / "Derived.py"
+        generate(shell, derived, out)                            # the proxy itself
+        proto = _load_module(out).StringBuilder
+        assert proto.__ps_expression__ == "$vs_prov_root.Append('ab')"
+
+        out2 = tmp_path / "Derived2.py"
+        generate(shell, derived.ps_ref, out2)                    # its variable name
+        assert _load_module(out2).StringBuilder.__ps_expression__ == \
+            "$vs_prov_root.Append('ab')"
+
+        # Wherever $vs_prov_root exists, the stub reaches the object again.
+        again = shell.make_proxy(proto)
+        assert again.ps_ref != derived.ps_ref
+        assert again.ToString() == "abab"
+
+    def test_stale_temporary_gives_actionable_error(self, shell):
+        with pytest.raises(ValueError, match="another session"):
+            shell.make_proxy("", "$__vs_ret_999999")

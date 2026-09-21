@@ -32,6 +32,29 @@ bound = shell.make_proxy(StringBuilder, "$existing")   # bind + keep typing
 
 Binding to a `$variable` that is null or undefined raises `ValueError`. A creation expression that no strategy can materialise raises `RuntimeError` with a per-strategy error report.
 
+If the Protocol class carries `__ps_assembly__` (generated for types that live
+outside the .NET runtime, such as a vendor SDK), `make_proxy` first loads that
+assembly into the session and registers its directory with a process-wide
+`AssemblyResolve` probe, so the stub is self-sufficient in a fresh session:
+
+```python
+from TiaPortal import TiaPortal          # generated with expression=...
+
+with Shell(powershell_edition="desktop") as sh:
+    tia = sh.make_proxy(TiaPortal)       # loads Siemens.Engineering.Base.dll, then creates
+```
+
+Note that `__ps_expression__` is what gets evaluated. A stub generated from a
+bare `$variable` whose type has no parameterless constructor still embeds the
+variable name, and `make_proxy(Proto)` then only works where that variable
+exists; generate with `expression=` to embed a real creation expression.
+
+`obj_ref` may also be a derived expression such as `"$tia.Projects"` or
+`"$sb.Append('x')"`: it is evaluated once into a private variable, so later
+member access does not re-run it. Every proxy exposes `ps_origin`, the
+expression it was reached by (`"$tia"`, `"[T]::new(3)"`, `"$tia.Projects"`,
+...), which `generate_psobject` uses for stubs of derived objects.
+
 ## Basic Usage
 
 ```python

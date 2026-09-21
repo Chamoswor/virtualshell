@@ -423,7 +423,8 @@ def _property_type(entry: MutableMapping[str, Any]) -> str:
 
 def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]], *,
                     ps_type_name: str = "", ps_expression: str = "",
-                    ps_static: bool = False) -> str:
+                    ps_static: bool = False,
+                    ps_assembly: str = "", ps_assembly_name: str = "") -> str:
     grouped = categorize_members(members)
     typing_bits: Set[str] = {"Protocol"}
     runtime_bits: Set[str] = set()
@@ -463,6 +464,9 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
     method_lines.append("")
     method_lines.append("    @property")
     method_lines.append("    def ps_ref(self) -> str: ...")
+    method_lines.append("")
+    method_lines.append("    @property")
+    method_lines.append("    def ps_origin(self) -> str: ...")
     typing_bits.update({"Any", "List", "Dict", "Callable"})
 
     if prop_lines and prop_lines[-1] == "":
@@ -477,6 +481,11 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
         meta_lines.append(f"    __ps_expression__: ClassVar[str] = {ps_expression!r}")
     if ps_static:
         meta_lines.append("    __ps_static__: ClassVar[bool] = True")
+    if ps_assembly:
+        # Outside the runtime: make_proxy loads this before the expression runs.
+        meta_lines.append(f"    __ps_assembly__: ClassVar[str] = {ps_assembly!r}")
+        if ps_assembly_name:
+            meta_lines.append(f"    __ps_assembly_name__: ClassVar[str] = {ps_assembly_name!r}")
     if meta_lines:
         typing_bits.add("ClassVar")
 
@@ -569,6 +578,79 @@ def fetch_static_members(shell, type_text: str) -> Tuple[str, List[MutableMappin
     return type_name, _decode_members((raw_result.out or "").strip())
 
 
+# Where does the type come from, and can it be built without arguments?
+# {type_expr} is `$obj.GetType()` for instances and `$obj` for static types.
+_ORIGIN_SCRIPT = """
+$__vs_t = {type_expr}
+$__vs_a = $__vs_t.Assembly
+$__vs_loc = ''
+try {{ $__vs_loc = [string]$__vs_a.Location }} catch {{ }}
+$__vs_gac = $false
+try {{ $__vs_gac = [bool]$__vs_a.GlobalAssemblyCache }} catch {{ }}
+[pscustomobject]@{{
+    loc = $__vs_loc
+    name = [string]$__vs_a.FullName
+    gac = $__vs_gac
+    rt = [string][System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+    pshome = [string]$PSHOME
+    tn = [string]$__vs_t.FullName
+    ctor0 = ($null -ne $__vs_t.GetConstructor([Type[]]@()))
+}} | ConvertTo-Json -Compress
+""".strip()
+
+_PLAIN_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+
+
+def fetch_origin(shell, *, static: bool = False) -> Dict[str, Any]:
+    """Assembly and constructor facts about ``$obj`` (empty dict on failure)."""
+    script = _ORIGIN_SCRIPT.format(type_expr="$obj" if static else "$obj.GetType()")
+    res = shell.run(script, raise_on_error=False)
+    if not res.success:
+        return {}
+    try:
+        data = json.loads((res.out or "").strip())
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _under(path: str, root: str) -> bool:
+    if not root:
+        return False
+    norm = lambda p: p.replace("/", "\\").lower().rstrip("\\")  # noqa: E731
+    return norm(path).startswith(norm(root) + "\\")
+
+
+def is_external_assembly(origin: MutableMapping[str, Any]) -> bool:
+    """True when the type's assembly must be loaded explicitly in a new session.
+
+    Runtime assemblies (GAC, the .NET runtime directory, the PowerShell
+    install) are always available and are not recorded; in-memory assemblies
+    (``Add-Type`` without -OutputAssembly) have no location and cannot be.
+    """
+    loc = str(origin.get("loc") or "")
+    if not loc or bool(origin.get("gac")):
+        return False
+    return not (_under(loc, str(origin.get("rt") or ""))
+                or _under(loc, str(origin.get("pshome") or "")))
+
+
+def derive_expression(raw: str, origin: MutableMapping[str, Any]) -> str:
+    """Creation expression to embed in the stub.
+
+    A ``$variable`` cannot recreate anything in another session, so when the
+    runtime type has a public parameterless constructor ``[Type]::new()`` is
+    embedded instead. Anything else is kept verbatim.
+    """
+    cleaned = (raw or "").strip()
+    if not cleaned.startswith("$"):
+        return cleaned
+    type_name = str(origin.get("tn") or "")
+    if bool(origin.get("ctor0")) and _PLAIN_TYPE_RE.fullmatch(type_name):
+        return f"[{type_name}]::new()"
+    return cleaned
+
+
 def safe_class_name(type_name: str) -> str:
     parts = [segment for segment in type_name.split(".") if segment]
     candidate = parts[-1] if parts else "PSObject"
@@ -576,7 +658,14 @@ def safe_class_name(type_name: str) -> str:
     return cleaned or "PSObject"
 
 
-def generate(shell, obj: str, output_path: Path) -> None:
+def generate(shell, obj: str, output_path: Path, *,
+             expression: Optional[str] = None) -> None:
+    """Write a Protocol stub for the object `obj` evaluates to.
+
+    `expression` overrides the creation expression embedded as
+    ``__ps_expression__`` (needed when `obj` is a ``$variable`` whose type has
+    no parameterless constructor).
+    """
     shell_needs_stop = False
     if (not shell.is_running):
         shell.start()
@@ -587,6 +676,20 @@ def generate(shell, obj: str, output_path: Path) -> None:
     shell.run("$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()", raise_on_error=False)
 
     from .ps_proxy import build_creation_strategies, static_type_literal
+
+    # A proxy (or a proxy's variable) knows how it was reached; that beats a
+    # temporary variable name that means nothing in another session.
+    ps_ref = getattr(obj, "ps_ref", None)
+    if isinstance(ps_ref, str):
+        origin = getattr(obj, "ps_origin", None)
+        if expression is None and origin and origin != ps_ref:
+            expression = str(origin)
+        obj = ps_ref
+    elif expression is None:
+        known = getattr(shell, "_proxy_origins", None) or {}
+        origin = known.get(str(obj).strip())
+        if origin and origin != str(obj).strip():
+            expression = str(origin)
 
     strategies = build_creation_strategies(obj)
     errors: List[str] = []
@@ -600,16 +703,20 @@ def generate(shell, obj: str, output_path: Path) -> None:
             except Exception as ex:
                 raise RuntimeError(
                     f"Unable to materialise a static type from '{obj}': {ex}") from ex
-            expression = f"[{static_inner}]"
+            origin = fetch_origin(shell, static=True)
+            assembly, assembly_name = _assembly_meta(origin)
+            static_expression = expression or f"[{static_inner}]"
             # Name the class after the caller's spelling: the reflected
             # FullName of a closed generic is assembly-qualified soup.
             protocol_name = safe_class_name(static_inner)
             source = render_protocol(protocol_name, members,
                                      ps_type_name=type_name,
-                                     ps_expression=expression, ps_static=True)
+                                     ps_expression=static_expression, ps_static=True,
+                                     ps_assembly=assembly, ps_assembly_name=assembly_name)
             output_path.write_text(source, encoding="utf-8")
             print(f"Generated {output_path} for static {type_name} "
-                  f"(expression: {expression})")
+                  f"(expression: {static_expression}"
+                  + (f"; assembly: {assembly}" if assembly else "") + ")")
             return
 
         for label, candidate in strategies:
@@ -624,12 +731,28 @@ def generate(shell, obj: str, output_path: Path) -> None:
             raise RuntimeError(
                 f"Unable to materialise an object from '{obj}'. Tried:\n  {details}")
 
-        label, expression, type_name, members = chosen
+        label, candidate, type_name, members = chosen
+        origin = fetch_origin(shell)
+        assembly, assembly_name = _assembly_meta(origin)
+        final_expression = expression or derive_expression(candidate, origin)
         protocol_name = safe_class_name(type_name)
         source = render_protocol(protocol_name, members,
-                                 ps_type_name=type_name, ps_expression=expression)
+                                 ps_type_name=type_name, ps_expression=final_expression,
+                                 ps_assembly=assembly, ps_assembly_name=assembly_name)
         output_path.write_text(source, encoding="utf-8")
-        print(f"Generated {output_path} for {type_name} (strategy: {label}; expression: {expression})")
+        print(f"Generated {output_path} for {type_name} (strategy: {label}; "
+              f"expression: {final_expression}"
+              + (f"; assembly: {assembly}" if assembly else "") + ")")
+        if final_expression.startswith("$") and not expression:
+            print(f"  note: {final_expression} is a variable reference, so "
+                  f"make_proxy({protocol_name}) can only bind an existing object; "
+                  "pass expression=... to embed a creation expression.")
     finally:
         if shell_needs_stop:
             shell.stop()
+
+
+def _assembly_meta(origin: MutableMapping[str, Any]) -> Tuple[str, str]:
+    if not is_external_assembly(origin):
+        return "", ""
+    return str(origin.get("loc") or ""), str(origin.get("name") or "")

@@ -90,6 +90,79 @@ TEST_CASE("desktop edition cannot start off Windows") {
 }
 #endif
 
+// ---- host crash handling ----
+// The child kills itself so its pipes break and no end marker ever arrives.
+// Before the fix this hung for the full timeout and then std::terminate'd in
+// ~IoPump (joinable reader threads), taking the whole process down.
+
+namespace {
+double seconds_since(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+} // namespace
+
+TEST_CASE("host crash mid-command fails fast with -3, start() relaunches") {
+    {
+        auto shell = start_shell(test_config());
+        const auto t0 = std::chrono::steady_clock::now();
+        auto res = shell->execute("Stop-Process -Id $PID -Force", /*timeoutSeconds=*/20.0);
+        CHECK(!res.success);
+        CHECK_EQ(res.exitCode, -3);
+        CHECK(contains(res.err, "exited unexpectedly"));
+        CHECK(seconds_since(t0) < 10.0);   // no waiting for the 20 s timeout
+        CHECK(!shell->isAlive());
+
+        // New work is rejected immediately, not enqueued into a dead pump.
+        auto rejected = shell->execute("1 + 1", 20.0);
+        CHECK_EQ(rejected.exitCode, -3);
+        CHECK(rejected.executionTime < 5.0);
+
+        // start() is the recovery path and must work without an explicit stop().
+        CHECK(shell->start());
+        CHECK(shell->isAlive());
+        auto after = shell->execute("40 + 2");
+        CHECK(after.success);
+        CHECK(contains(after.out, "42"));
+        shell->stop();
+        CHECK(!shell->isAlive());
+    }
+}
+
+TEST_CASE("host crash during initial commands, auto-restart off: stop() and destroy are safe") {
+    auto cfg = test_config();
+    cfg.autoRestartOnTimeout = false;
+    cfg.timeoutSeconds = 20;
+    cfg.initialCommands.push_back("Stop-Process -Id $PID -Force");
+    {
+        auto shell = std::make_shared<VirtualShell>(cfg);
+        const auto t0 = std::chrono::steady_clock::now();
+        (void)shell->start();
+        CHECK(seconds_since(t0) < 10.0);
+        CHECK(!shell->isAlive());
+        shell->stop();
+        CHECK(!shell->isAlive());
+    }   // destructor after stop()
+    {
+        auto shell = std::make_shared<VirtualShell>(cfg);
+        (void)shell->start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }   // destructor without stop()
+}
+
+TEST_CASE("host crash during initial commands, auto-restart on: destroy is safe") {
+    auto cfg = test_config();
+    cfg.timeoutSeconds = 20;
+    cfg.initialCommands.push_back("Stop-Process -Id $PID -Force");
+    {
+        auto shell = std::make_shared<VirtualShell>(cfg);
+        const auto t0 = std::chrono::steady_clock::now();
+        (void)shell->start();
+        CHECK(seconds_since(t0) < 10.0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        CHECK(!shell->isAlive());
+    }
+}
+
 TEST_CASE("execute returns stdout, success and timing") {
     auto shell = start_shell(test_config());
     auto res = shell->execute("Write-Output 'hello'");

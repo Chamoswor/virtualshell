@@ -64,6 +64,8 @@ private:
     std::atomic<bool> isRunning_{false};  ///< True if PowerShell process is alive
     std::atomic<bool> lifecycleGate_{false};  ///< Blocks submissions while lifecycle transitions run
     std::atomic<bool> isRestarting_{false}; ///< True if a restart is in progress
+    std::atomic<bool> stopping_{false};     ///< True while stop() tears the host down (pipe EOF is expected then)
+    std::atomic<bool> processExited_{false}; ///< True once the host died on its own (pipes hit EOF outside stop())
     std::mutex stopMx_;                   ///< Serializes stop() invocations
     
     std::unique_ptr<virtualshell::core::PowerShellProcess> process_; ///< Active PowerShell host process
@@ -213,10 +215,12 @@ public:
 
     /**
      * @brief Start the PowerShell process.
-     * 
+     *
      * Allocates pipes, spawns the child process, and launches reader/writer threads.
+     * If the previous host died on its own (see onProcessExited_) its remains are
+     * torn down first, so start() also serves as the recovery call after a crash.
      * @return true if the process started successfully
-     * @return false if process creation failed
+     * @return false if process creation failed or a host is already running
      */
     bool start();
 
@@ -521,6 +525,15 @@ private:
      * @brief Route a raw stdout/stderr chunk received from the process.
      */
     void onChunk_(bool isErr, std::string_view sv);
+    /**
+     * @brief Called by the I/O pump when the host's pipes reach EOF.
+     *
+     * Ignored while stop() is closing the pipes itself. Otherwise the host
+     * died unexpectedly: every in-flight command is completed at once with
+     * exit code -3 instead of waiting for its timeout, and submit() rejects
+     * new work until start() relaunches the host.
+     */
+    void onProcessExited_();
     /**
      * @brief Buffer a chunk for later readOutput/readError calls.
      */

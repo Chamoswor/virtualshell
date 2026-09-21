@@ -31,6 +31,7 @@ namespace core {
         std::atomic<bool>                  timedOut{false}; ///< True if command exceeded timeout
         std::atomic<bool>                  psSuccess{true}; ///< $? reported by PowerShell on the end marker line
         std::atomic<bool>                  restartInterrupted{false}; ///< True if command was aborted during restart
+        std::atomic<bool>                  processExited{false}; ///< True if the host process died while the command was in flight
         double                             startMonotonic{}; ///< Start time in monotonic seconds
         double                             timeoutSec{}; ///< Timeout in seconds for this command
         std::function<void(const ExecutionResult&)> cb{};  ///< Optional callback for completion

@@ -246,6 +246,8 @@ class Shell:
         # Detected from the running host on first use; cleared by stop().
         self._edition: Optional[str] = None
         self._version: Optional[str] = None
+        # proxy variable -> expression it was reached by (see PsProxy.ps_origin)
+        self._proxy_origins: Dict[str, str] = {}
         self.pid: Optional[int] = None
     
     @property
@@ -314,6 +316,7 @@ class Shell:
         # A later start() may resolve a different executable; re-detect then.
         self._edition = None
         self._version = None
+        self._proxy_origins.clear()
         try:
             self._core.stop(force)
         except Exception as e:  # Surface backend failures in a consistent type.
@@ -627,33 +630,91 @@ class Shell:
           `generate_psobject`: the embedded ``__ps_expression__`` metadata
           recreates the object, and the return value is typed as the protocol
           so no annotation is needed. Pass `obj_ref` (e.g. "$existing") to
-          bind an existing variable instead of creating a new object.
+          bind an existing variable instead of creating a new object; an
+          empty `obj_ref` means the same as omitting it.
 
         A bare type literal such as ``make_proxy("", "[System.IO.Path]")``
         yields a *static* proxy exposing the type's static methods,
         properties and constants. `static=True` forces static mode for an
         unbracketed type name or a ``$variable`` that holds a type object.
         """
-        from .ps_proxy import PsProxy
+        from .ps_proxy import PsProxy, ensure_assembly_loaded
 
         if isinstance(type_name, type):
             proto = type_name
             ps_type = str(getattr(proto, "__ps_type_name__", "") or "")
-            expression = str(getattr(proto, "__ps_expression__", "") or "") or ps_type
-            if not expression:
+            expression = str(getattr(proto, "__ps_expression__", "") or "")
+            if not ps_type and not expression:
                 raise TypeError(
                     f"{proto.__name__} carries no __ps_type_name__/__ps_expression__ "
                     "metadata; regenerate it with generate_psobject")
+            if not expression and not obj_ref:
+                # Package stubs for non-root types: reached through a parent.
+                raise TypeError(
+                    f"{proto.__name__} ({ps_type}) has no creation expression: objects of "
+                    "this type are obtained from a parent object (e.g. tia.Projects), or "
+                    "bind one with obj_ref='$variable' / '$parent.Member'")
+            expression = expression or ps_type
             is_static = static or bool(getattr(proto, "__ps_static__", False))
-            return PsProxy(self, ps_type, obj_ref if obj_ref is not None else expression,
-                           static=is_static)
+            # Types from outside the runtime (recorded by generate_psobject)
+            # need their assembly loaded before the expression can run.
+            assembly = str(getattr(proto, "__ps_assembly__", "") or "")
+            if assembly:
+                ensure_assembly_loaded(
+                    self, assembly, str(getattr(proto, "__ps_assembly_name__", "") or ""))
+            # None and "" both mean "use the stub's own expression".
+            return PsProxy(self, ps_type, obj_ref or expression, static=is_static)
 
         return PsProxy(self, type_name, obj_ref if obj_ref is not None else "$obj",
                        static=static)
 
-    def generate_psobject(self, command: str, output_path: Path) -> None:
-        """Generate a PowerShell object from a command."""
-        return generate(self, command, output_path)
+    def generate_psobject(self, command: Union[str, "PsProxy"], output_path: Path, *,
+                          expression: Optional[str] = None,
+                          follow: bool = False,
+                          include_namespaces: Optional[Sequence[str]] = None,
+                          max_types: int = 2000) -> Optional[List[Path]]:
+        """Generate a typed Python ``Protocol`` for the object `command` yields.
+
+        `command` is a PowerShell expression, a ``$variable``, a bare type
+        literal (``"[Vendor.Sdk.Root]"``), or a `PsProxy`.
+
+        With ``follow=True``, `output_path` is a *package directory*: the
+        type graph reachable from the root through properties, indexers,
+        method returns and parameters is walked by reflection, and one module
+        per type is written, cross-annotated with each other (so
+        ``tia.Projects`` is typed ``ProjectComposition`` and
+        ``projects.Item(0)`` is typed ``Project``, with completion all the way
+        down). Only types outside the .NET runtime (the SDK) are followed;
+        runtime types map to Python scalars or ``Any`` and enums to ``str``.
+        `include_namespaces` (e.g. ``["Siemens.Engineering"]``) restricts the
+        walk to those namespaces and the namespaces nested under them; an
+        empty list follows every SDK type. `max_types` caps the walk. Returns
+        the written module paths. Only the root module carries
+        ``__ps_expression__``; other types are reached via a parent.
+
+        The generated class embeds what `make_proxy(GeneratedClass)` needs to
+        reach the object again in another session: the type name, an
+        expression, and, for types outside the .NET runtime, the assembly path
+        to load first. The expression is, in order of preference: `expression`
+        if given; the proxy's `ps_origin` (e.g. ``"$tia.Projects"`` for an
+        object obtained through a parent proxy, also found when `command` is
+        such a proxy's `ps_ref`); ``[Type]::new()`` for a ``$variable`` whose
+        type has a parameterless constructor; else `command` itself. Pass
+        `expression` when none of those can recreate the object, e.g.
+        ``"[Siemens.Engineering.TiaPortal]::new([Siemens.Engineering.TiaPortalMode]::WithoutUserInterface)"``.
+        """
+        if follow:
+            from .generate_package import generate_package
+            return generate_package(self, command, Path(output_path), expression=expression,
+                                    include_namespaces=(list(include_namespaces)
+                                                        if include_namespaces else None),
+                                    max_types=int(max_types))
+        generate(self, command, output_path, expression=expression)
+        return None
+
+    def _register_proxy_origin(self, ref: str, origin: str) -> None:
+        """Called by PsProxy: remember how proxy variable `ref` was reached."""
+        self._proxy_origins[ref] = origin
 
     def pwsh(self, s: str, timeout: Optional[float] = None, raise_on_error: bool = False) -> ExecutionResult:
         """Execute a **literal** PowerShell string safely.

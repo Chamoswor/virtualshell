@@ -19,7 +19,7 @@ class ExitCode(IntEnum):
     GENERAL_ERROR = 1
     TIMEOUT = -1
     RESTARTING = -2  # Internal use; not from PowerShell itself.
-    NOT_RUNNING = -3  # Internal use; not from PowerShell itself.
+    NOT_RUNNING = -3  # Host not started, or it exited/crashed; start() relaunches it.
 
 @runtime_checkable
 class ExecutionResultLike(Protocol):

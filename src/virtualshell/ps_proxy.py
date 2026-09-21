@@ -17,10 +17,12 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import os
 import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .errors import ExecutionError
@@ -41,8 +43,51 @@ def _ps_quote(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
+_ASSEMBLY_HELPER = Path(__file__).resolve().parent / "assembly_resolver.ps1"
+
+
+def helper_prelude(script: Path, function_name: str) -> List[str]:
+    """Command lines that dot-source a bundled .ps1 unless `function_name` already exists.
+
+    Prepend to a command so the helper is loaded in the same round trip.
+    """
+    lines: List[str] = []
+    if os.name == "nt":
+        # Dot-sourcing a .ps1 needs a permissive policy on Windows (5.1 defaults to Restricted).
+        lines.append("Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force "
+                     "-ErrorAction SilentlyContinue")
+    lines.append(f"if (-not (Get-Command {function_name} -ErrorAction SilentlyContinue)) {{ . "
+                 + _ps_quote(str(script)) + " }")
+    return lines
+
+
+def ensure_assembly_loaded(shell: "Shell", path: str, full_name: str = "") -> None:
+    """Load the assembly at `path` into the session, once.
+
+    Used for generated protocols that carry ``__ps_assembly__``: the type's
+    assembly is not part of the runtime, so a fresh session has to load it
+    before the creation expression can run. The assembly's directory is also
+    registered with a process-wide AssemblyResolve probe (see
+    assembly_resolver.ps1) so its own dependencies resolve. One round trip.
+    """
+    if not path:
+        return
+    if not shell.is_running:
+        shell.start()
+    lines = helper_prelude(_ASSEMBLY_HELPER, "Import-VsAssembly")
+    lines.append(f"Import-VsAssembly -Path {_ps_quote(path)} -FullName {_ps_quote(full_name)}")
+    res = shell.run("\n".join(lines))
+    if not res.success:
+        raise ExecutionError(
+            f"Could not load assembly {path}: {(res.err or '').strip()[:400]}")
+
+
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _VARIABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# A bare variable reference ("$tia", "$global:tia"): bound in place. Anything
+# else starting with "$" ("$tia.Projects") is a derived expression that is
+# evaluated once into a private variable.
+_PLAIN_VAR_RE = re.compile(r"^\$(?:[A-Za-z]+:)?[A-Za-z_][A-Za-z0-9_]*$")
 _TYPE_LIKE_RE = re.compile(r"^[A-Za-z0-9_\.\[\],`+ ]+$")
 
 _counter = itertools.count()
@@ -493,17 +538,28 @@ class PsProxy:
         literal = static_type_literal(ref)
         object.__setattr__(self, "_static", bool(static) or literal is not None)
 
-        if ref.startswith("$"):
+        if _PLAIN_VAR_RE.fullmatch(ref):
+            # Bind an existing variable in place.
             self._validate_ref(ref)
             object.__setattr__(self, "_ref", ref)
             object.__setattr__(self, "_owns_ref", False)
+            object.__setattr__(self, "_origin", ref)
         elif self._static:
-            inner = literal if literal is not None else ref
+            inner = (literal if literal is not None else ref).strip()
+            if inner.startswith("[") and inner.endswith("]"):
+                inner = inner[1:-1].strip()
             object.__setattr__(self, "_ref", self._materialize_static(inner))
             object.__setattr__(self, "_owns_ref", True)
+            object.__setattr__(self, "_origin", f"[{inner}]")
         else:
-            object.__setattr__(self, "_ref", self._materialize(ref))
+            # A creation expression, or a derived "$var.Member..." expression:
+            # evaluated once into a private variable so later member access
+            # and method calls do not re-run it.
+            ref_var, origin = self._materialize(ref)
+            object.__setattr__(self, "_ref", ref_var)
             object.__setattr__(self, "_owns_ref", True)
+            object.__setattr__(self, "_origin", origin)
+        self._register_origin()
 
         object.__setattr__(self, "_schema", self._load_schema(type_name))
 
@@ -533,9 +589,19 @@ class PsProxy:
             f"if ($null -eq {ref}) {{ 'null' }} else {{ 'ok' }}",
             label=f"Binding to {ref}")
         if out != "ok":
-            raise ValueError(f"PowerShell variable {ref} is null or undefined")
+            hint = ""
+            if ref.startswith("$__vs_"):
+                hint = (" (a virtualshell temporary from another session; regenerate "
+                        "the stub from the proxy object or pass expression=, so it "
+                        "records how the object is reached, e.g. '$tia.Projects')")
+            raise ValueError(f"PowerShell variable {ref} is null or undefined{hint}")
 
-    def _materialize(self, expression: str) -> str:
+    def _materialize(self, expression: str) -> Tuple[str, str]:
+        """Evaluate `expression` into a private variable.
+
+        Returns ``($var, candidate)`` where `candidate` is the PowerShell
+        expression that succeeded; it becomes the proxy's origin.
+        """
         strategies = build_creation_strategies(expression)
         if not strategies:
             raise ValueError(f"Cannot build an object from {expression!r}")
@@ -550,7 +616,7 @@ class PsProxy:
                     f"if ($null -eq ${var}) {{ 'null' }} else {{ 'ok' }}",
                     timeout=self._timeout)
                 if check.success and (check.out or "").strip() == "ok":
-                    return f"${var}"
+                    return f"${var}", candidate
                 errors.append(f"{label}: produced null")
             else:
                 errors.append(f"{label}: {(res.err or '').strip()[:200]}")
@@ -607,7 +673,8 @@ class PsProxy:
         with _SCHEMA_LOCK:
             return _SCHEMA_CACHE.get((run_id, type_name))
 
-    def _sub_proxy(self, ref: str, type_name: str) -> "PsProxy":
+    def _sub_proxy(self, ref: str, type_name: str,
+                   origin: Optional[str] = None) -> "PsProxy":
         proxy = object.__new__(PsProxy)
         object.__setattr__(proxy, "_shell", self._shell)
         object.__setattr__(proxy, "_timeout", self._timeout)
@@ -617,6 +684,8 @@ class PsProxy:
         object.__setattr__(proxy, "_owns_ref", True)
         # Values returned from calls are instances, never types.
         object.__setattr__(proxy, "_static", False)
+        object.__setattr__(proxy, "_origin", origin)
+        proxy._register_origin()
 
         cached = self._cached_schema(self._shell.python_run_id, type_name)
         if cached is not None:
@@ -625,13 +694,68 @@ class PsProxy:
             object.__setattr__(proxy, "_schema", proxy._load_schema(type_name))
         return proxy
 
+    # -- provenance ------------------------------------------------------------
+    # Every proxy remembers the PowerShell expression it was reached by, so a
+    # stub generated from a derived object ("$tia.Projects") can say how to get
+    # there again instead of naming a temporary variable.
+
+    def _register_origin(self) -> None:
+        register = getattr(self._shell, "_register_proxy_origin", None)
+        if register is not None and self._origin:
+            register(self._ref, self._origin)
+
+    def _origin_base(self) -> Optional[str]:
+        origin = self._origin
+        if origin is None:
+            return None
+        if self._static or _PLAIN_VAR_RE.fullmatch(origin):
+            return origin
+        return f"({origin})"
+
+    def _member_origin(self, name: str) -> Optional[str]:
+        base = self._origin_base()
+        if base is None or not _IDENT_RE.match(name):
+            return None
+        return f"{base}::{name}" if self._static else f"{base}.{name}"
+
+    def _call_origin(self, name: str, origin_args: List[Optional[str]],
+                     *, awaited: bool) -> Optional[str]:
+        base = self._origin_base()
+        if base is None or not _IDENT_RE.match(name) or any(a is None for a in origin_args):
+            return None
+        arg_text = ", ".join(a for a in origin_args if a is not None)
+        call = f"{base}::{name}({arg_text})" if self._static else f"{base}.{name}({arg_text})"
+        return f"({call}).GetAwaiter().GetResult()" if awaited else call
+
+    def _origin_arg(self, value: Any, formatted: str) -> Optional[str]:
+        """`formatted` if the argument can be re-created from source text, else None."""
+        if isinstance(value, PsProxy):
+            return value._origin
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return None  # travels through the bridge as a temporary variable
+        if isinstance(value, (list, tuple, set)):
+            items = list(value)
+        elif isinstance(value, dict):
+            items = list(value.values())
+        else:
+            return formatted
+        for item in items:
+            if isinstance(item, PsProxy) or self._origin_arg(item, "") is None:
+                return None
+        return formatted
+
     def _bridge(self):
         return self._shell.zero_copy_bridge()
 
     # -- value transport -------------------------------------------------------
 
-    def _fetch_value(self, expr: str, *, label: str) -> Any:
-        """Assign `expr` to a temp var, then convert by runtime type."""
+    def _fetch_value(self, expr: str, *, label: str,
+                     origin: Optional[str] = None) -> Any:
+        """Assign `expr` to a temp var, then convert by runtime type.
+
+        `origin` is the reproducible expression recorded on a resulting
+        sub-proxy (None when the value cannot be reached from source text).
+        """
         ret = _next_var("ret")
         self._run(f"${ret} = ({expr})", label=label)
 
@@ -663,7 +787,7 @@ class PsProxy:
                 f"Remove-Variable -Name {ret} -ErrorAction SilentlyContinue")
             return data
         if kind == "o":
-            return self._sub_proxy(f"${ret}", str(info.get("t") or ""))
+            return self._sub_proxy(f"${ret}", str(info.get("t") or ""), origin)
         raise ExecutionError(f"{label}: unknown value kind {kind!r}")
 
     def _format_argument(self, value: Any, *, cleanup: List[str]) -> str:
@@ -744,7 +868,8 @@ class PsProxy:
             expr = (_static_member_expr(self._ref, name) if self._static
                     else _member_expr(self._ref, name))
             return self._fetch_value(
-                expr, label=f"Read property {schema.type_name}.{name}")
+                expr, label=f"Read property {schema.type_name}.{name}",
+                origin=self._member_origin(name))
         if name in dynamic:
             return dynamic[name]
         raise AttributeError(
@@ -813,6 +938,7 @@ class PsProxy:
         out_buffers: List[Tuple[int, str]] = []  # (python arg index, ps var)
 
         ps_args: List[str] = []
+        origin_args: List[Optional[str]] = []
         try:
             for index, value in enumerate(args):
                 param = None
@@ -828,29 +954,35 @@ class PsProxy:
                     cleanup.append(var)
                     out_buffers.append((index, var))
                     ps_args.append(f"${var}")
+                    origin_args.append(None)
                 elif param is not None and param.is_array and \
                         param.type_name.startswith("System.Byte") and \
                         isinstance(value, (bytes, memoryview)):
                     ps_args.append(self._format_argument(bytes(value),
                                                          cleanup=cleanup))
+                    origin_args.append(None)
                 else:
                     ps_args.append(self._format_argument(value,
                                                          cleanup=cleanup))
+                    origin_args.append(self._origin_arg(value, ps_args[-1]))
 
             if self._static:
                 call = _static_method_call_expr(self._ref, meta.name, ps_args)
             else:
                 call = _method_call_expr(self._ref, meta.name, ps_args)
             return_type = overload.return_type if overload else ""
-            if _AWAITABLE_RE.search(return_type):
+            awaited = bool(_AWAITABLE_RE.search(return_type))
+            if awaited:
                 call = f"({call}).GetAwaiter().GetResult()"
+            origin = (self._call_origin(meta.name, origin_args, awaited=awaited)
+                      if not out_buffers else None)
 
             label = f"Call {self._schema.type_name}.{meta.name}"
             if return_type in ("System.Void", "Void", "void"):
                 self._run(call, label=label)
                 result: Any = None
             else:
-                result = self._fetch_value(call, label=label)
+                result = self._fetch_value(call, label=label, origin=origin)
 
             for index, var in out_buffers:
                 data = bytes(self._bridge().receive(
@@ -872,6 +1004,18 @@ class PsProxy:
     def ps_ref(self) -> str:
         """The PowerShell variable this proxy is bound to (with $)."""
         return self._ref
+
+    @property
+    def ps_origin(self) -> Optional[str]:
+        """PowerShell expression that reaches this object again, or None.
+
+        ``"$tia"`` for a bound variable, ``"[T]::new(...)"`` for a created
+        object, ``"$tia.Projects"`` / ``"$sb.Append('x')"`` for values obtained
+        through a proxy. None when the path involved data that only existed
+        as temporaries (bytes sent through the bridge, out-buffers).
+        `generate_psobject` embeds it as ``__ps_expression__``.
+        """
+        return self._origin
 
     def proxy_schema(self) -> Dict[str, Any]:
         schema = self._schema

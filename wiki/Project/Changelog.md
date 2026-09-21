@@ -12,6 +12,30 @@
 - `Config.powershell_path` now defaults to "" (resolved from the edition at start)
   instead of "pwsh"
 - Integration tests run once per installed PowerShell edition
+- Generated protocol stubs are self-sufficient: `generate_psobject` records the
+  type's assembly (`__ps_assembly__` / `__ps_assembly_name__`) when it lives
+  outside the .NET runtime, embeds `[Type]::new()` for `$variable` inputs whose
+  type has a parameterless constructor, and takes `expression=` for the rest;
+  `make_proxy(GeneratedClass)` loads the assembly (with a directory-probing
+  `AssemblyResolve` handler, see `assembly_resolver.ps1`) before creating the
+  object, so a stub works in a brand-new session
+- `generate_psobject(..., follow=True)` writes a package of cross-annotated
+  stubs for the whole SDK type graph reachable from the root (reflection-based,
+  no live instances needed): properties, indexers, returns and parameters are
+  typed with the generated classes, so completion works down the object graph
+  (`tia.Projects.Item(0)` -> `Project`). `include_namespaces=` / `max_types=`
+  bound the walk
+- Proxies record provenance (`PsProxy.ps_origin`: "$tia", "[T]::new(3)",
+  "$tia.Projects", "$sb.Append('x')"); `generate_psobject` accepts a proxy (or
+  its `ps_ref`) and embeds that path, so stubs for derived objects reach the
+  object again instead of naming a temporary variable. `make_proxy` accepts
+  derived "$var.Member" expressions as `obj_ref`
+- A host process that dies on its own now fails in-flight commands immediately
+  with exit code -3 ("PowerShell process exited unexpectedly", preceded by the
+  host's last stderr) instead of waiting for the timeout; `start()` relaunches it
+- Fixed a std::terminate (Python: "Fatal Python error: Aborted", exit code 3)
+  when a Shell whose host had died was stopped or garbage-collected: the I/O
+  pump skipped joining its reader threads once they had hit EOF
 
 ## 1.1.0
 - Added per-command timeouts for async and batch commands

@@ -8,7 +8,9 @@ from virtualshell.generate_psobject import (
     _property_type,
     build_method_signatures,
     categorize_members,
+    derive_expression,
     first_signature,
+    is_external_assembly,
     map_ps_type,
     parse_parameters,
     property_is_writable,
@@ -421,3 +423,127 @@ class TestGenerateEndToEnd:
         m = shell.make_proxy(Math)
         assert m.Sqrt(16.0) == 4.0
         assert abs(m.PI - 3.141592653589793) < 1e-12
+
+
+class TestOriginMetadata:
+    RT = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\"
+    PSHOME = "C:\\Program Files\\PowerShell\\7"
+
+    def _origin(self, **over):
+        base = {"loc": "C:\\Vendor\\Api\\Vendor.Api.dll", "name": "Vendor.Api, Version=1.0",
+                "gac": False, "rt": self.RT, "pshome": self.PSHOME,
+                "tn": "Vendor.Api.Client", "ctor0": True}
+        base.update(over)
+        return base
+
+    def test_vendor_assembly_is_external(self):
+        assert is_external_assembly(self._origin())
+
+    def test_gac_runtime_and_pshome_are_not_external(self):
+        assert not is_external_assembly(self._origin(gac=True))
+        assert not is_external_assembly(self._origin(loc=self.RT + "mscorlib.dll"))
+        assert not is_external_assembly(
+            self._origin(loc=self.PSHOME + "\\System.Management.Automation.dll"))
+        assert not is_external_assembly(self._origin(loc=""))          # in-memory Add-Type
+        assert not is_external_assembly({})
+
+    def test_forward_slashes_and_case_are_normalized(self):
+        assert not is_external_assembly(
+            self._origin(loc="c:/program files/powershell/7/pwsh.dll"))
+
+    def test_variable_with_default_ctor_becomes_new_expression(self):
+        assert derive_expression("$sb", self._origin()) == "[Vendor.Api.Client]::new()"
+
+    def test_variable_without_default_ctor_stays_a_variable(self):
+        assert derive_expression("$tia", self._origin(ctor0=False)) == "$tia"
+
+    def test_generic_type_is_not_bracketed(self):
+        origin = self._origin(tn="System.Collections.Generic.List`1[[System.String]]")
+        assert derive_expression("$l", origin) == "$l"
+
+    def test_non_variable_expressions_are_kept(self):
+        assert derive_expression("[Vendor.Api.Client]::new(3)", self._origin()) == \
+            "[Vendor.Api.Client]::new(3)"
+
+    def test_render_protocol_embeds_assembly_metadata(self):
+        source = render_protocol("Client", [], ps_type_name="Vendor.Api.Client",
+                                 ps_expression="[Vendor.Api.Client]::new()",
+                                 ps_assembly="C:\\Vendor\\Api\\Vendor.Api.dll",
+                                 ps_assembly_name="Vendor.Api, Version=1.0")
+        compile(source, "<generated>", "exec")
+        assert r"__ps_assembly__: ClassVar[str] = 'C:\\Vendor\\Api\\Vendor.Api.dll'" in source
+        assert "__ps_assembly_name__: ClassVar[str] = 'Vendor.Api, Version=1.0'" in source
+
+    def test_render_protocol_without_assembly_has_no_assembly_lines(self):
+        source = render_protocol("Sb", [], ps_type_name="System.Text.StringBuilder",
+                                 ps_expression="[System.Text.StringBuilder]::new()")
+        assert "__ps_assembly__" not in source
+
+
+def _load_module(path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@integration
+class TestGenerateReconstruction:
+    """The stub alone must be enough for make_proxy() in a brand-new session."""
+
+    def test_framework_type_records_no_assembly(self, shell, tmp_path):
+        from virtualshell.generate_psobject import generate
+
+        out_file = tmp_path / "sb.py"
+        shell.run("$vs_gen_sb = [System.Text.StringBuilder]::new()", raise_on_error=True)
+        generate(shell, "$vs_gen_sb", out_file)
+        source = out_file.read_text(encoding="utf-8")
+        assert "__ps_assembly__" not in source
+        # A $variable with a parameterless ctor becomes a creation expression.
+        assert "__ps_expression__: ClassVar[str] = '[System.Text.StringBuilder]::new()'" in source
+
+    def test_explicit_expression_overrides(self, shell, tmp_path):
+        from virtualshell.generate_psobject import generate
+
+        out_file = tmp_path / "sb2.py"
+        shell.run("$vs_gen_sb2 = [System.Text.StringBuilder]::new(8)", raise_on_error=True)
+        generate(shell, "$vs_gen_sb2", out_file,
+                 expression="[System.Text.StringBuilder]::new(64)")
+        proto = _load_module(out_file).StringBuilder
+        assert proto.__ps_expression__ == "[System.Text.StringBuilder]::new(64)"
+        assert shell.make_proxy(proto).Capacity == 64
+        assert shell.make_proxy(proto, "").Capacity == 64     # "" == use the stub's expression
+
+    def test_external_assembly_round_trips_into_fresh_session(self, shell, edition, tmp_path):
+        from virtualshell import Shell
+        from virtualshell.generate_psobject import generate
+
+        dll = tmp_path / "VsTestWidget.dll"
+        code = ("namespace VsTest { public class Widget { public int Value = 7; "
+                "public string Hello(string n) { return \"hi \" + n; } } }")
+        res = shell.run(
+            f"Add-Type -TypeDefinition '{code}' -OutputAssembly '{dll}'", timeout=120)
+        if not res.success or not dll.exists():
+            pytest.skip(f"Add-Type -OutputAssembly unavailable here: {res.err[:200]}")
+        shell.run(f"[Reflection.Assembly]::LoadFrom('{dll}') | Out-Null; "
+                  "$vs_widget = [VsTest.Widget]::new()", raise_on_error=True)
+
+        out_file = tmp_path / "Widget.py"
+        generate(shell, "$vs_widget", out_file)
+        proto = _load_module(out_file).Widget
+        assert proto.__ps_expression__ == "[VsTest.Widget]::new()"
+        assert proto.__ps_assembly__.lower().replace("/", "\\") == str(dll).lower()
+        # pwsh names the emitted assembly after a temp file, 5.1 after the dll;
+        # either way it is the manifest name LoadFrom reports again later.
+        assert "Version=" in proto.__ps_assembly_name__
+
+        # Brand-new host: nothing loaded, no $vs_widget. The stub must suffice.
+        with Shell(timeout_seconds=60, powershell_edition=edition) as fresh:
+            widget = fresh.make_proxy(proto)
+            assert widget.Hello("x") == "hi x"
+            assert widget.Value == 7
+            assert fresh.run("[VirtualShell.AssemblyDirResolver]::Directories()").out.strip()
+            # Second proxy: assembly already loaded, no double load.
+            assert fresh.make_proxy(proto).Value == 7
