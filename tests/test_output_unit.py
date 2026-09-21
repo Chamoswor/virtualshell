@@ -141,6 +141,31 @@ class TestShellBudgetWiring:
             offset = page.next_offset
         assert collected == full
 
+    def test_budget_annotates_result_fields(self, fake_core):
+        sh = Shell(cpp_module=fake_core).start()
+        fake_core.last_shell.result_factory = lambda cmd: FakeExecutionResult(out="y" * 9000)
+        res = sh.run("big", max_output=500)
+        assert res.truncated is True
+        assert res.output_key
+        assert res.error_key is None
+        assert sh.fetch_output(res.output_key).total_chars == 9000
+
+    def test_error_stream_gets_its_own_key(self, fake_core):
+        sh = Shell(cpp_module=fake_core).start()
+        fake_core.last_shell.result_factory = lambda cmd: FakeExecutionResult(
+            out="ok", err="e" * 9000, exit_code=1, success=False)
+        res = sh.run("noisy", max_output=500)
+        assert res.truncated is True
+        assert res.output_key is None          # out fit the budget
+        assert res.error_key
+        assert sh.fetch_output(res.error_key).total_chars == 9000
+
+    def test_untruncated_result_fields_are_falsy(self, fake_core):
+        sh = Shell(cpp_module=fake_core).start()
+        res = sh.run("small")                  # no budget at all
+        assert res.truncated is False
+        assert res.output_key is None and res.error_key is None
+
     def test_fetch_output_unknown_key_raises_virtualshell_error(self, fake_core):
         sh = Shell(cpp_module=fake_core).start()
         with pytest.raises(VirtualShellError, match="evicted or never existed"):

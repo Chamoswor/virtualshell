@@ -36,11 +36,15 @@ print(res.out)
 # <last ~1300 chars>
 ```
 
-The *full* output stays in memory (bounded store, oldest evicted). The marker
-names the continuation key; page through the rest on demand:
+The *full* output stays in memory (bounded store, oldest evicted). The result
+carries the continuation key as a field — no need to parse the marker:
 
 ```python
-page = sh.fetch_output("a1b2c3d4", offset=2666)
+res.truncated      # True when a budget was applied
+res.output_key     # continuation key for res.out (None if not truncated)
+res.error_key      # same for res.err
+
+page = sh.fetch_output(res.output_key)
 page.text          # next chunk
 page.next_offset   # pass back in; None when done
 page.total_chars, page.total_lines
@@ -109,6 +113,15 @@ sh.run("Remove-Item big.log")   # runs as a dry run, prints "What if: ...",
                                 # deletes nothing
 ```
 
+`dry_run_destructive` matches its own `destructive=` list (default:
+`Remove-*`, `Set-*`, `Stop-*`, `Clear-*`, `Disable-*`, `Uninstall-*`,
+`Restart-*`, `Reset-*`, ...), not the `confirm` list. Evaluation order is
+deny → dynamic → read-only/allow → confirm → dry run; a command approved via
+`on_confirm` runs for real, and a `confirm` match **without** an `on_confirm`
+handler is blocked. The dry run sets `$WhatIfPreference`, which only affects
+cmdlets that implement ShouldProcess — `[IO.File]::Delete(...)` or
+`cmd /c del` are untouched by it (see the limits below).
+
 How it works: before anything executes, the command is parsed with
 PowerShell's own AST parser in the hosted session (parse only — nothing runs),
 every `CommandAst` is collected recursively, aliases are resolved, and the
@@ -120,10 +133,20 @@ commands raise `PolicyViolationError` (with `.command`, `.reason`,
 Honest limits — a policy is a guardrail, not a sandbox:
 
 - `$x = 5` is an expression, not a command; session state can always change.
-- .NET calls (`[IO.File]::Delete(...)`) are not command invocations.
+- .NET calls (`[IO.File]::Delete(...)`) are not command invocations, and
+  `$WhatIfPreference` does not affect them (nor external programs) — only
+  cmdlets that implement ShouldProcess honor the dry run.
 - `& $var` / `Invoke-Expression` cannot be inspected statically; restrictive
   policies (read-only or allow-list) block them, lenient ones let them pass
   (set `block_dynamic=True` to block them always).
+
+The read-only lane allows `Get-*`, `Find-*`, `Search-*`, `Test-*`,
+`Measure-*`, `Select-*`, `Sort-*`, `Group-*`, `Compare-*`, `Format-*`,
+`ConvertTo-/ConvertFrom-*`, `Resolve-*`, `Where-Object`, `ForEach-Object`,
+`Write-*`, `Join-Path`/`Split-Path`/`Join-String`, `Start-Sleep`, and the
+non-writing `Out-` cmdlets (`Out-String`, `Out-Null`, `Out-Host`,
+`Out-Default` — **not** `Out-File`). Everything else, including every `Set-*`
+and `New-*` and any external program, is blocked; extend with `allow=`.
 
 ---
 
@@ -166,9 +189,15 @@ sh.run("$data.Count")                   # state survived via the checkpoint
 
 - Pending commands fail immediately (`success=False`) instead of waiting for
   their timeout.
-- `restore=False` skips the state reload.
+- The automatic restart after a *timeout* reloads the same newest snapshot,
+  so checkpointed state survives timeouts exactly like interrupts.
+- `restore=False` starts a clean host instead (named checkpoints remain
+  restorable by hand).
 - `checkpoint(name)` / `restore(name)` also work standalone as undo for
   session state — `restore()` with no argument reloads the newest snapshot.
+- A checkpoint captures global variables, functions, aliases, loaded modules
+  (re-imported on restore), PSDrives, environment variables and the current
+  location.
 - Snapshots are Clixml: live .NET objects come back as property bags, and
   `make_proxy` proxies / the zero-copy bridge must be recreated after an
   interrupt.

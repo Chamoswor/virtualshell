@@ -31,7 +31,7 @@
 - `python_run_id: str` · `session_path: Path` · `policy: ExecutionPolicy|None` _(swap guardrails at runtime)_
 
 **Result protocols**
-- `ExecutionResult`: `.out`, `.err`, `.exit_code`, `.success`, `.execution_time`
+- `ExecutionResult`: `.out`, `.err`, `.exit_code`, `.success`, `.execution_time`; results from `run()` additionally carry `.truncated`, `.output_key`, `.error_key` (continuation keys for `fetch_output` when a `max_output` budget truncated them)
 - `BatchProgress` (async batch callbacks): `.currentCommand`, `.totalCommands`, `.lastResult`, `.isComplete`, `.allResults`
 - `OutputSlice` (from `fetch_output`): `.text`, `.offset`, `.next_offset`, `.total_chars`, `.total_lines`, `.at_end`
 

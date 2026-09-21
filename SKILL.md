@@ -30,14 +30,23 @@ with Shell() as sh:
     r = sh.run("Get-Date")
     r.out          # stdout, stripped ("2" for "1+1")
     r.err          # stderr text
-    r.success      # bool; r.exit_code (0 ok, -1 timeout, -3 host died)
+    r.success      # bool
+    r.exit_code    # 0 ok, 1 command failed; negative = library-side:
+                   # -1 timeout, -2 restarting, -3 host died
     r.execution_time
 ```
+
+Default error behavior differs: `run()` returns failures as data
+(`success=False`, text in `err`) unless you pass `raise_on_error=True`, while
+`run_objects()` raises by default.
 
 `run(list_of_commands)` executes a batch in order and returns a list of
 results. `run_async(cmd)` returns a `concurrent.futures.Future`.
 `script(path, args)` runs a `.ps1` with positional (list) or named (dict)
-arguments. `Shell` is thread-safe for concurrent `run` calls.
+arguments. `Shell` is thread-safe, and blocking calls release the GIL, so
+other Python threads keep running while PowerShell works — but one Shell is
+one PowerShell process, which executes commands sequentially; use several
+`Shell` instances for genuinely parallel PowerShell.
 
 ## Prefer objects over text
 
@@ -64,12 +73,17 @@ res = sh.run("Get-ChildItem C:\\Windows -Recurse")
 # ... [virtualshell: output truncated - 51203 chars / 1200 lines total,
 #      showing first 2666 and last 1290 chars;
 #      more: fetch_output('a1b2c3d4', offset=2666)] ...
-page = sh.fetch_output("a1b2c3d4", offset=2666)   # OutputSlice
+res.truncated      # True when a budget was applied
+res.output_key     # continuation key for res.out (None if not truncated)
+res.error_key      # same for res.err
+
+page = sh.fetch_output(res.output_key)            # OutputSlice
 page.text, page.next_offset, page.total_chars, page.total_lines
 ```
 
-Loop on `page.next_offset` until it is `None`. The full text lives in a
-bounded in-memory store (oldest evicted).
+Use the `output_key` field — no need to parse the marker text. Loop on
+`page.next_offset` until it is `None`. The full text lives in a bounded
+in-memory store (oldest evicted).
 
 ## Errors are typed - don't guess from strings
 
@@ -87,7 +101,8 @@ sh.run(cmd, raise_on_error=True)   # or Shell(raise_on_error=True) session-wide
   (`-Credential $cred`, `-Confirm:$false`).
 - `ExecutionTimeoutError`: raised on timeout when
   `auto_restart_on_timeout=False`; with the default (True) a timeout returns
-  `exit_code == -1` and the host restarts (state lost unless snapshotted).
+  `exit_code == -1` and the host restarts, reloading the newest
+  `checkpoint()`/`save_session()` snapshot (no snapshot = state lost).
 - `PolicyViolationError` (`.command`, `.reason`, `.matched`): blocked by
   policy, never executed.
 - Without `raise_on_error`, inspect `res.success` / `res.err`.
@@ -102,16 +117,37 @@ sh.policy = ExecutionPolicy(                                # swap anytime
     deny=["Stop-Computer", "Restart-Computer"],
     confirm=["Remove-*", "Stop-Process"],                   # needs approval
     on_confirm=lambda req: ask_human(req.command),          # req.matched too
-    dry_run_destructive=True,                               # auto -WhatIf
+    dry_run_destructive=True,                               # -WhatIf dry runs
 )
 ```
+
+Rules, in evaluation order:
+
+- `deny` always blocks. `confirm` matches need `on_confirm` to return truthy —
+  **without an `on_confirm` handler, a `confirm` match raises
+  `PolicyViolationError`**. A command approved via `on_confirm` runs for real
+  (no dry run on top).
+- `read_only=True` allows only a safe set: `Get-*`, `Find-*`, `Test-*`,
+  `Measure-*`, `Select-*`, `Sort-*`, `Group-*`, `Compare-*`, `Format-*`,
+  `ConvertTo-/ConvertFrom-*`, `Resolve-*`, `Where-Object`, `ForEach-Object`,
+  `Write-*`, `Out-String/Null/Host/Default` and `Start-Sleep`. Everything
+  else — including all `Set-*`, `New-*`, `Out-File` and external programs —
+  is blocked. Extend the lane with `allow=["Import-Csv", ...]`.
+- `dry_run_destructive=True` applies to its own `destructive=` pattern list
+  (default: `Remove-*`, `Set-*`, `Stop-*`, `Clear-*`, `Disable-*`,
+  `Uninstall-*`, `Restart-*`, `Reset-*`, and more), *not* to the `confirm`
+  list. Matches run inside `& { $WhatIfPreference = $true; ... }`.
 
 Commands are parsed (never executed) with PowerShell's own AST parser before
 running; aliases resolve (`rm` -> `Remove-Item`), script-block bodies are
 inspected recursively, and `script()` checks the file's content. Restrictive
 policies block `& $var` / `Invoke-Expression` (not statically inspectable).
-Limits: `$x = 5` is an expression (always passes); .NET method calls are not
-command invocations — a policy is a guardrail, not a sandbox.
+
+Limits — a policy is a guardrail, not a sandbox: `$x = 5` is an expression
+(always passes); .NET method calls are not command invocations; and
+`$WhatIfPreference` only affects cmdlets that implement ShouldProcess —
+`[IO.File]::Delete(...)`, `cmd /c del` and other non-cmdlet paths run for
+real even under `dry_run_destructive`.
 
 ## Long-running or runaway commands
 
@@ -126,9 +162,16 @@ sh.run("$data.Count")                  # state restored from the checkpoint
 ```
 
 `interrupt()` force-restarts the hidden host and reloads the newest
-`checkpoint()`/`save_session()` snapshot; `restore(name)` / `restore()` is
-manual undo for session state. Snapshots are Clixml: live .NET objects come
-back as property bags; recreate `make_proxy` proxies afterwards.
+`checkpoint()`/`save_session()` snapshot — and so does the automatic restart
+after a timeout, so checkpointed state survives both. `restore(name)` /
+`restore()` is manual undo for session state; `interrupt(restore=False)`
+gives a clean host instead.
+
+A checkpoint captures global variables, functions, aliases, loaded modules
+(re-imported on restore — no need to `Import-Module` again), PSDrives,
+environment variables and the current location. Snapshots are Clixml: live
+.NET objects come back as property bags; recreate `make_proxy` proxies
+afterwards.
 
 ## Learn an unfamiliar module before calling it
 
@@ -154,8 +197,7 @@ Everything in this file works on both.
 Never interpolate untrusted text into a command. Quote it:
 
 ```python
-from virtualshell import Shell
-from virtualshell.shell import quote_pwsh_literal
+from virtualshell import quote_pwsh_literal
 sh.run(f"Write-Output {quote_pwsh_literal(user_text)}")
 ```
 

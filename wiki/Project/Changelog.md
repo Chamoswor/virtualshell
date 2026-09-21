@@ -38,6 +38,18 @@ Agent-friendly execution surface (and a friendlier API for humans):
   after a host crash - no explicit `start()` needed); `strip_results` now
   defaults to True (`sh.run("1+1").out == "2"`); `Shell(raise_on_error=...)`
   sets a session-wide default for `run`/`script`
+- Results from run() carry `truncated` / `output_key` / `error_key` fields,
+  so paging a budget-truncated output needs no marker parsing
+  (`ExecutionResult` is bound with dynamic attributes now)
+- The blocking calls (execute/execute_batch/execute_script/execute_script_kv,
+  start, stop) release the GIL: other Python threads keep running while
+  PowerShell works (one Shell still executes commands sequentially - use
+  several Shells for parallel PowerShell)
+- checkpoint()/restore() keep the C++ session snapshot in sync, so the
+  automatic restart after a timeout reloads the newest checkpoint too
+  (previously only save_session() survived timeouts); interrupt(restore=False)
+  removes the snapshot so the fresh host really starts clean
+- `quote_pwsh_literal` is exported from the package root
 - Breaking: results are stripped by default (pass `strip_results=False` for
   the raw stream text); `run()` after a dead host relaunches it instead of
   returning exit code -3

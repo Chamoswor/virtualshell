@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import tempfile
 import time
 import concurrent.futures as cf
@@ -405,15 +406,29 @@ class Shell:
                 command=str(script_path), matched=decision.matched)
 
     def _budget_result(self, res: ExecutionResult, max_output: Optional[int]) -> ExecutionResult:
-        """Apply the output budget to a result's `out`/`err` in place."""
+        """Apply the output budget to a result's `out`/`err` in place.
+
+        Annotates the result with `truncated`, `output_key` and `error_key`
+        so callers can page truncated output without parsing the marker text.
+        """
         budget = self._max_output if max_output is None else int(max_output)
+        out_key: Optional[str] = None
+        err_key: Optional[str] = None
         if budget and budget > 0:
             if isinstance(res.out, str):
-                res.out, _ = apply_budget(res.out, budget, self._output_store,
-                                          label="output")
+                res.out, out_key = apply_budget(res.out, budget, self._output_store,
+                                                label="output")
             if isinstance(res.err, str):
-                res.err, _ = apply_budget(res.err, budget, self._output_store,
-                                          label="error output")
+                res.err, err_key = apply_budget(res.err, budget, self._output_store,
+                                                label="error output")
+        try:
+            res.truncated = bool(out_key or err_key)
+            res.output_key = out_key
+            res.error_key = err_key
+        except AttributeError:
+            # Extension built before 1.3 (ExecutionResult without dynamic
+            # attributes): the keys remain available inside the marker text.
+            pass
         return res
 
     def _effective_raise(self, raise_on_error: Optional[bool]) -> bool:
@@ -794,11 +809,15 @@ class Shell:
                    timeout: Optional[float] = None) -> Checkpoint:
         """Save a named restore point of the session state.
 
-        Captures global variables, functions, aliases, modules, PSDrives,
-        environment variables and the current location. Re-using a name
-        overwrites that checkpoint. Returns the :class:`Checkpoint`; undo back
-        to it later with ``restore(name)`` (or plain ``restore()`` for the
-        newest one).
+        Captures global variables, functions, aliases, loaded modules,
+        PSDrives, environment variables and the current location. Re-using a
+        name overwrites that checkpoint. Returns the :class:`Checkpoint`; undo
+        back to it later with ``restore(name)`` (or plain ``restore()`` for
+        the newest one).
+
+        The newest checkpoint also becomes the session snapshot that an
+        *automatic* restart reloads (timeout with ``auto_restart_on_timeout``,
+        or ``interrupt()``), so state saved here survives those too.
 
         Live .NET objects are snapshotted by value (Clixml), not kept alive:
         after a restore they come back as property bags, and `make_proxy`
@@ -818,8 +837,28 @@ class Shell:
         cp = Checkpoint(name=str(name), path=path, created_at=time.time())
         self._checkpoints = [c for c in self._checkpoints if c.name != cp.name]
         self._checkpoints.append(cp)
-        self._last_restore_point = path
+        self._sync_session_snapshot(path)
         return cp
+
+    def _sync_session_snapshot(self, path: Path) -> None:
+        """Make `path` the state an automatic restart reloads.
+
+        The C++ backend reloads ``session_snapshot_path`` (and only that file)
+        whenever it starts the host - including the auto-restart after a
+        timeout - so the newest checkpoint/restore target is copied there to
+        keep every restart path consistent.
+        """
+        try:
+            if path == self._session_path:
+                self._last_restore_point = self._session_path
+            elif path.exists():
+                shutil.copyfile(path, self._session_path)
+                self._last_restore_point = self._session_path
+            else:
+                self._last_restore_point = path
+        except OSError:
+            # Fall back to restoring explicitly (interrupt() handles this).
+            self._last_restore_point = path
 
     @property
     def checkpoints(self) -> tuple:
@@ -833,7 +872,9 @@ class Shell:
 
         Restoring re-applies the saved variables, functions, aliases, modules,
         drives, environment and location on top of the current session; items
-        created *after* the checkpoint are not deleted.
+        created *after* the checkpoint are not deleted. The restored state
+        also becomes the snapshot that an automatic restart reloads, so a
+        later timeout does not jump forward to a newer checkpoint.
         """
         self._ensure_ready()
         if checkpoint is None:
@@ -855,6 +896,7 @@ class Shell:
         _raise_on_failure(res, raise_on_error=True,
                           raise_on_timeout=self._raise_on_timeout,
                           label="restore", timeout_used=timeout)
+        self._sync_session_snapshot(path)
         return _strip_result_fields(res) if self._strip_results else res
 
     def interrupt(self, *, restore: bool = True) -> bool:
@@ -870,7 +912,9 @@ class Shell:
         With ``restore=True`` (default) the newest ``checkpoint()`` /
         ``save_session()`` snapshot is loaded into the fresh host, so saved
         variables, functions and aliases survive the interrupt. State created
-        after the last snapshot is lost — checkpoint before risky steps.
+        after the last snapshot is lost — checkpoint before risky steps. (The
+        automatic restart after a timeout reloads the same snapshot, so
+        checkpointed state survives timeouts too.)
 
         Live `make_proxy` proxies and the zero-copy bridge do not survive the
         restart and must be recreated.
@@ -889,12 +933,23 @@ class Shell:
         self._generic_methods.clear()
         self._pwsh_mem_init = False
         self._core.stop(True)
+        if not restore:
+            # start() reloads the session snapshot whenever the file exists,
+            # so a clean restart has to remove it. Named checkpoint files
+            # remain restorable by hand.
+            try:
+                self._session_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._last_restore_point = (
+                self._checkpoints[-1].path if self._checkpoints else None)
         if not self._core.start():
             raise PowerShellNotFoundError(
                 "interrupt(): failed to restart the PowerShell process")
         self.pid = self._core.get_process_id()
-        # start() already reloads the save_session() snapshot when it exists;
-        # a newer named checkpoint still needs an explicit restore.
+        # start() reloads the session snapshot, which _sync_session_snapshot
+        # keeps pointed at the newest checkpoint/save/restore; the explicit
+        # restore below only fires when that copy could not be made.
         if (restore and self._last_restore_point is not None
                 and self._last_restore_point != self._session_path):
             res = self._run_bundled_script(self._restore_script_path,

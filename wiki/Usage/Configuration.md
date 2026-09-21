@@ -30,4 +30,7 @@
 Every feature (sync/async execution, scripts, session snapshots, the zero-copy bridge, `make_proxy`, `generate_psobject`) works on both editions. The hosts still differ in language surface: Windows PowerShell 5.1 has no `$PSStyle`, no ternary / `??` operators, and prints errors in the classic multi-line format. Branch on `shell.edition` when you need PowerShell 7-only syntax.
 
 **Utilities**
-- `quote_pwsh_literal(s: str) -> str` – safely single‑quote arbitrary text for PowerShell
+- `quote_pwsh_literal(s: str) -> str` – safely single‑quote arbitrary text for PowerShell (`from virtualshell import quote_pwsh_literal`)
+
+**Threading**
+- `Shell` is thread-safe, and the blocking calls (`run`, `script`, `start`, `stop`) release the GIL, so other Python threads keep running while PowerShell works. One Shell hosts one PowerShell process, which executes commands sequentially; create several Shells for genuinely parallel PowerShell.

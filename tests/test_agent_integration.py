@@ -83,11 +83,13 @@ class TestOutputBudget:
         res = shell.run('1..2000 | ForEach-Object { "line $_" }', max_output=1500)
         assert len(res.out) <= 1500
         assert "fetch_output(" in res.out
-        key = res.out.split("fetch_output('")[1].split("'")[0]
+        # The key is a field on the result, and matches the marker text.
+        assert res.truncated is True
+        assert res.output_key in res.out
 
         collected, offset = "", 0
         while True:
-            page = shell.fetch_output(key, offset=offset, max_output=10000)
+            page = shell.fetch_output(res.output_key, offset=offset, max_output=10000)
             collected += page.text
             if page.next_offset is None:
                 break
@@ -95,6 +97,29 @@ class TestOutputBudget:
         assert collected.startswith("line 1")
         assert collected.rstrip().endswith("line 2000")
         assert page.total_lines == 2000
+
+    def test_untruncated_result_is_annotated_falsy(self, shell):
+        res = shell.run("1+1", max_output=4000)
+        assert res.truncated is False
+        assert res.output_key is None and res.error_key is None
+
+
+class TestGilRelease:
+    def test_python_threads_run_while_powershell_blocks(self, shell):
+        import threading
+
+        done = []
+        th = threading.Thread(
+            target=lambda: done.append(shell.run("Start-Sleep -Seconds 2")))
+        th.start()
+        time.sleep(0.3)                 # let the sync run enter the backend
+        t0 = time.time()
+        sum(range(10**6))               # pure-Python work
+        elapsed = time.time() - t0
+        th.join()
+        assert done and done[0].success
+        # With the GIL held during execute() this would take ~2 s.
+        assert elapsed < 0.5
 
 
 class TestPromptBlocking:
@@ -242,6 +267,36 @@ class TestInterrupt:
         assert shell.interrupt() is True
         assert shell.is_running
         assert shell.run("$vs_idle").out == "1"
+
+    def test_interrupt_restore_false_gives_clean_host(self, edition):
+        from virtualshell import Shell
+
+        sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+        try:
+            sh.run("$vs_clean = 'dirty'")
+            sh.checkpoint("kept-on-disk")
+            assert sh.interrupt(restore=False) is True
+            assert sh.run("$vs_clean").out == ""          # clean host
+            sh.restore("kept-on-disk")                    # still restorable
+            assert sh.run("$vs_clean").out == "dirty"
+        finally:
+            sh.stop(force=True)
+
+
+class TestTimeoutRestoresCheckpoint:
+    def test_checkpoint_survives_timeout_auto_restart(self, edition):
+        from virtualshell import Shell
+
+        sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+        try:
+            sh.run("$vs_to = 'kept'")
+            sh.checkpoint("pre-timeout")
+            res = sh.run("Start-Sleep -Seconds 20", timeout=2)
+            assert res.exit_code == -1                    # timed out
+            # The auto-restart reloads the newest checkpoint.
+            assert sh.run("$vs_to").out == "kept"
+        finally:
+            sh.stop(force=True)
 
 
 class TestSchemas:

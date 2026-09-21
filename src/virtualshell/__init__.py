@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from .shell import ExecutionResult, BatchProgress, Shell, ExitCode, Config, Checkpoint
     from .policy import ExecutionPolicy, ConfirmRequest, PolicyDecision
     from .output import OutputSlice
+    from ._util import quote_pwsh_literal
     from .zero_copy_bridge_shell import ZeroCopyBridge, PSObject
 
 try:
@@ -28,6 +29,7 @@ __all__ = [
     "PromptBlockedError", "PolicyViolationError",
     "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode", "Config",
     "Checkpoint", "ExecutionPolicy", "ConfirmRequest", "PolicyDecision", "OutputSlice",
+    "quote_pwsh_literal",
     "ZeroCopyBridge", "PSObject",
 ]
 
@@ -46,6 +48,11 @@ def __getattr__(name: str):
         return obj
     if name == "OutputSlice":
         mod = import_module(".output", __name__)
+        obj = getattr(mod, name)
+        globals()[name] = obj
+        return obj
+    if name == "quote_pwsh_literal":
+        mod = import_module("._util", __name__)
         obj = getattr(mod, name)
         globals()[name] = obj
         return obj

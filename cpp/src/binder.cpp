@@ -111,7 +111,9 @@ PYBIND11_MODULE(_core, m) {
     (void)virtualshell::pybridge::PyDispatcher::inst();
     m.doc() = "Internal module for VirtualShell bindings";
     // ExecutionResult
-    py::class_<VirtualShell::ExecutionResult>(m, "ExecutionResult")
+    // dynamic_attr: the Python wrapper annotates results (truncated,
+    // output_key, error_key) without a parallel result type.
+    py::class_<VirtualShell::ExecutionResult>(m, "ExecutionResult", py::dynamic_attr())
         .def_readwrite("out", &VirtualShell::ExecutionResult::out)
         .def_readwrite("err", &VirtualShell::ExecutionResult::err)
         .def_readwrite("exit_code", &VirtualShell::ExecutionResult::exitCode)
@@ -172,16 +174,25 @@ PYBIND11_MODULE(_core, m) {
         .def(py::init<const VirtualShell::Config&>())
 
         // Process control
-        .def("start",    &VirtualShell::start, "Start the PowerShell process")
-        .def("stop",     &VirtualShell::stop,  py::arg("force") = false, "Stop the PowerShell process")
+        // The blocking calls release the GIL: while PowerShell works, other
+        // Python threads keep running (VirtualShell itself never touches
+        // Python objects; async callbacks go through the GIL-safe dispatcher).
+        .def("start",    &VirtualShell::start,
+             py::call_guard<py::gil_scoped_release>(),
+             "Start the PowerShell process")
+        .def("stop",     &VirtualShell::stop,  py::arg("force") = false,
+             py::call_guard<py::gil_scoped_release>(),
+             "Stop the PowerShell process")
         .def("is_alive", &VirtualShell::isAlive, "Check if the PowerShell process is running")
 
         // Sync commands
         .def("execute", &VirtualShell::execute,
              py::arg("command"), py::arg("timeout_seconds") = 0.0,
+             py::call_guard<py::gil_scoped_release>(),
              "Execute a PowerShell command synchronously")
         .def("execute_batch", &VirtualShell::execute_batch,
              py::arg("commands"), py::arg("timeout_seconds") = 0.0,
+             py::call_guard<py::gil_scoped_release>(),
              "Execute a batch of PowerShell commands synchronously")
         .def("execute_script", &VirtualShell::execute_script,
              py::arg("script_path"),
@@ -189,6 +200,7 @@ PYBIND11_MODULE(_core, m) {
              py::arg("timeout_seconds") = 0.0,
              py::arg("dot_source") = false,
              py::arg("raise_on_error") = false,
+             py::call_guard<py::gil_scoped_release>(),
              "Execute a PowerShell script file synchronously")
         .def("execute_script_kv", &VirtualShell::execute_script_kv,
              py::arg("script_path"),
@@ -196,6 +208,7 @@ PYBIND11_MODULE(_core, m) {
              py::arg("timeout_seconds") = 0.0,
              py::arg("dot_source") = false,
              py::arg("raise_on_error") = false,
+             py::call_guard<py::gil_scoped_release>(),
              "Execute script with named parameters via hashtable splatting")
 
         // Async: single
