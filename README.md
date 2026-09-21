@@ -24,7 +24,11 @@ get:
 * a persistent PowerShell session
 * ~2–4 ms execution latency
 * async and batch execution
-* structured, predictable results
+* structured, predictable results — including `run_objects()` returning
+  Python objects instead of text
+* guardrails for agent-driven automation: allow/deny policies, read-only
+  lanes, confirmation hooks, output budgets, fast interrupt with state
+  restore
 * optional zero-copy shared memory transfers (cross-platform)
 * live object proxies with generated type stubs
 
@@ -92,13 +96,50 @@ python -c "import virtualshell; print('virtualshell OK')"
 ```python
 from virtualshell import Shell
 
-with Shell(timeout_seconds=5) as sh:
-    print(sh.run("Write-Output 'Hello from pwsh'").out.strip())
+with Shell() as sh:                       # starts on first use
+    print(sh.run("1 + 1").out)            # "2" - results come pre-stripped
 
     sh.run("function Inc { $global:i++; $global:i }")
-    print(sh.run("Inc").out.strip())  # 1
-    print(sh.run("Inc").out.strip())  # 2
+    print(sh.run("Inc").out)              # 1
+    print(sh.run("Inc").out)              # 2
+
+    # Objects instead of text - nothing to parse:
+    for p in sh.run_objects("Get-Process", select=["Name", "Id"], first=3):
+        print(p["Name"], p["Id"])
 ```
+
+### Built for agents (and cautious humans)
+
+virtualshell is designed to be driven by LLM agents safely and cheaply:
+
+```python
+from virtualshell import Shell, ExecutionPolicy, PolicyViolationError
+
+sh = Shell(
+    max_output=4000,                      # cap tokens: head+tail view with a
+                                          # continuation key; page the rest
+                                          # with sh.fetch_output(key, offset)
+    policy=ExecutionPolicy(
+        read_only=True,                   # exploration lane: Get-*/Select-*/...
+    ),
+)
+
+sh.run("Get-ChildItem C:\\ -Recurse")     # big output arrives budgeted
+sh.run("Remove-Item x")                   # PolicyViolationError, never executes
+sh.run("rm x")                            # aliases resolve first - also blocked
+```
+
+Policies support allow/deny globs, an `on_confirm` hook for human approval of
+destructive commands (`Remove-*`, `Stop-*`, ...) and automatic `-WhatIf` dry
+runs. Prompting commands (`Read-Host`, `Get-Credential`) fail immediately with
+a typed `PromptBlockedError` instead of hanging. A runaway command is
+cancelled in ~0.5 s with `sh.interrupt()`, which restores session state from
+the newest `sh.checkpoint()`. And `sh.command_schema("Get-Process")` /
+`sh.module_schemas("VendorModule")` emit MCP-style tool definitions straight
+from `Get-Command` metadata.
+
+See [Agents & Guardrails](https://github.com/Chamoswor/virtualshell/wiki/Agents-&-Guardrails)
+in the wiki for the full guide.
 
 ### Async execution
 
@@ -198,15 +239,20 @@ See the `make_proxy` and `generate_psobject` pages in the wiki.
 
 ## Core API overview
 
-| Method                         | Description                     |
-| ------------------------------ | ------------------------------- |
-| `Shell.run(...)`               | Execute a command synchronously |
-| `Shell.run_async(...)`         | Schedule async execution        |
-| `Shell.script(...)`            | Run `.ps1` files                |
-| `Shell.save_session()`         | Persist a session snapshot      |
-| `Shell.make_proxy(...)`        | Create a live PS object proxy   |
-| `Shell.generate_psobject(...)` | Generate Python `Protocol`s     |
-| `Shell.zero_copy_bridge()`     | Shared per-shell bridge         |
+| Method                         | Description                                   |
+| ------------------------------ | --------------------------------------------- |
+| `Shell.run(...)`               | Execute a command synchronously (`max_output` budgets the result) |
+| `Shell.run_objects(...)`       | Execute and get Python objects back           |
+| `Shell.run_async(...)`         | Schedule async execution                      |
+| `Shell.script(...)`            | Run `.ps1` files                              |
+| `Shell.fetch_output(...)`      | Page through budget-truncated output          |
+| `Shell.interrupt()`            | Abort the running command, keep session state |
+| `Shell.checkpoint(...)` / `Shell.restore(...)` | Named restore points for session state |
+| `Shell.command_schema(...)`    | MCP-style tool definition for a command       |
+| `Shell.save_session()`         | Persist a session snapshot                    |
+| `Shell.make_proxy(...)`        | Create a live PS object proxy                 |
+| `Shell.generate_psobject(...)` | Generate Python `Protocol`s                   |
+| `Shell.zero_copy_bridge()`     | Shared per-shell bridge                       |
 
 ## Configuration example
 
@@ -287,5 +333,6 @@ Full methodology and charts live in the wiki.
 ## Learn more
 
 * [Documentation wiki](https://github.com/Chamoswor/virtualshell/wiki)
+* [llms.txt](llms.txt) and [SKILL.md](SKILL.md) — compact guides written for LLM agents
 * [Issues](https://github.com/Chamoswor/virtualshell/issues)
 * [Discussions](https://github.com/Chamoswor/virtualshell/discussions)

@@ -190,10 +190,11 @@ class TestHostCrash:
             assert time.time() - t0 < 10          # not the 30 s timeout
             assert not sh.is_running
 
-            rejected = sh.run("1 + 1")
-            assert rejected.exit_code == ExitCode.NOT_RUNNING
-
-            sh.start()                            # relaunch, no stop() needed
+            # run() auto-starts a fresh host after the crash - no explicit
+            # start() needed anymore.
+            recovered = sh.run("1 + 1")
+            assert recovered.success
+            assert recovered.out.strip() == "2"
             assert sh.is_running
             assert sh.run("40 + 2").out.strip() == "42"
         finally:

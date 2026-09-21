@@ -181,14 +181,14 @@ class TestRun:
         assert [r.out for r in results] == ["a", "b", "c"]
         assert ("execute_batch", ["a", "b", "c"], 5.0) in fake_core.last_shell.calls
 
-    def test_strip_results(self, fake_core):
-        sh = Shell(strip_results=True, cpp_module=fake_core).start()
+    def test_strip_results_default_on(self, fake_core):
+        sh = Shell(cpp_module=fake_core).start()
         fake_core.last_shell.result_factory = lambda cmd: FakeExecutionResult(out=f"  {cmd}  ")
         assert sh.run("hi").out == "hi"
         assert [r.out for r in sh.run(["a", "b"])] == ["a", "b"]
 
     def test_set_strip_results_toggle(self, fake_core):
-        sh = Shell(cpp_module=fake_core).start()
+        sh = Shell(strip_results=False, cpp_module=fake_core).start()
         fake_core.last_shell.result_factory = lambda cmd: FakeExecutionResult(out=f" {cmd} ")
         assert sh.run("x").out == " x "
         sh.set_strip_results(True)

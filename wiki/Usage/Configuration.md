@@ -14,7 +14,12 @@
 - `stdin_buffer_size: int = 65536` – size of the stdin pipe buffer in bytes
 - `initial_commands: Optional[List[str]]` – send commands at process start
 - `set_UTF8: bool = True` – set UTF‑8 output encoding in session
-- `strip_results: bool = False` – when `True`, trims whitespace for `.out` / `.err` on returned results (dataclass path)
+- `strip_results: bool = True` – trims leading/trailing whitespace from `.out` / `.err` on returned results, so `sh.run("1+1").out == "2"`; set `False` for the raw stream text
+- `policy: Optional[ExecutionPolicy] = None` – guardrails (allow/deny lists, read-only lane, confirmation hook, auto `-WhatIf`); see [Agents & Guardrails](Agents-&-Guardrails)
+- `max_output: Optional[int] = None` – default character budget for `run()` output; larger output is returned head+tail with a continuation marker for `fetch_output`
+- `raise_on_error: bool = False` – session-wide default for the `raise_on_error` argument of `run` / `script`
+
+`run()` and the other execution methods start the backend automatically when it is not running, so an explicit `start()` is optional (a context manager or `stop()` is still the way to shut it down).
 
 **Inspecting the running host**
 - `shell.configured_edition` – the `powershell_edition` value the Shell was built with

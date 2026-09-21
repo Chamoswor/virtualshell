@@ -3,7 +3,9 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .shell import ExecutionResult, BatchProgress, Shell, ExitCode, Config
+    from .shell import ExecutionResult, BatchProgress, Shell, ExitCode, Config, Checkpoint
+    from .policy import ExecutionPolicy, ConfirmRequest, PolicyDecision
+    from .output import OutputSlice
     from .zero_copy_bridge_shell import ZeroCopyBridge, PSObject
 
 try:
@@ -16,19 +18,34 @@ from .errors import (
     PowerShellNotFoundError,
     ExecutionTimeoutError,
     ExecutionError,
+    PromptBlockedError,
+    PolicyViolationError,
 )
 
 __all__ = [
     "VirtualShellError", "PowerShellNotFoundError",
     "ExecutionTimeoutError", "ExecutionError",
+    "PromptBlockedError", "PolicyViolationError",
     "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode", "Config",
+    "Checkpoint", "ExecutionPolicy", "ConfirmRequest", "PolicyDecision", "OutputSlice",
     "ZeroCopyBridge", "PSObject",
 ]
 
 # Lazy loading of submodules and attributes to avoid importing compiled extension at package import time
 def __getattr__(name: str):
-    if name in {"Shell", "ExecutionResult", "BatchProgress", "ExitCode", "Config"}:
+    if name in {"Shell", "ExecutionResult", "BatchProgress", "ExitCode", "Config", "Checkpoint"}:
         mod = import_module(".shell", __name__)
+        obj = getattr(mod, name)
+        globals()[name] = obj
+        return obj
+    # Pure-Python modules: importable without the compiled extension.
+    if name in {"ExecutionPolicy", "ConfirmRequest", "PolicyDecision"}:
+        mod = import_module(".policy", __name__)
+        obj = getattr(mod, name)
+        globals()[name] = obj
+        return obj
+    if name == "OutputSlice":
+        mod = import_module(".output", __name__)
         obj = getattr(mod, name)
         globals()[name] = obj
         return obj

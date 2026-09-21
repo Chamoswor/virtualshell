@@ -1,6 +1,47 @@
 ### Page: Changelog
 
 ```
+## 1.3.0
+
+Agent-friendly execution surface (and a friendlier API for humans):
+
+- `run(cmd, max_output=N)` bounds how much output a call returns: head+tail
+  view with an inline continuation marker; the full text stays in a bounded
+  in-memory store and `fetch_output(key, offset)` pages through it
+  (`OutputSlice`). `Shell(max_output=...)` sets a session default
+- `run_objects(cmd, select=..., first=..., depth=...)` returns the pipeline's
+  objects as Python values (ConvertTo-Json in-session, parsed in Python,
+  always a list); strict errors by default, assignments persist in the session
+- `ExecutionPolicy` guardrails enforced before anything executes
+  (`Shell(policy=...)` or `shell.policy = ...`): allow/deny glob patterns over
+  the *resolved* command names (PowerShell AST parse in-session, recursive
+  into script blocks, aliases resolved), `read_only=True` lanes,
+  `confirm=[...]` + `on_confirm` approval hook, `dry_run_destructive=True`
+  auto-WhatIf, `block_dynamic` for `& $var` / `Invoke-Expression`; blocked
+  commands raise `PolicyViolationError` (`.command`, `.reason`, `.matched`);
+  `script()` inspects the file's content the same way
+- `interrupt()` aborts the running command *now* (fast force-restart of the
+  host; pending futures fail immediately instead of waiting for their
+  timeout) and reloads the newest checkpoint/save_session snapshot, so
+  session state survives a runaway command
+- `checkpoint(name)` / `restore(name_or_none)` / `checkpoints`: named restore
+  points for session state on top of the existing snapshot scripts
+- Commands that try to prompt (`Read-Host`, `Get-Credential`, confirmation
+  prompts, missing mandatory parameters) raise the dedicated
+  `PromptBlockedError` (subclass of `ExecutionError`) under
+  `raise_on_error=True` instead of a generic error
+- `command_schema(name)` / `module_schemas(module)` generate MCP-style tool
+  definitions (JSON Schema parameters, enum values from ValidateSet/enum
+  types, required from Mandatory, synopsis from Get-Help) so agents can call
+  unfamiliar modules correctly on the first try
+- Quality of life: `run()`/`script()`/... auto-start the backend (including
+  after a host crash - no explicit `start()` needed); `strip_results` now
+  defaults to True (`sh.run("1+1").out == "2"`); `Shell(raise_on_error=...)`
+  sets a session-wide default for `run`/`script`
+- Breaking: results are stripped by default (pass `strip_results=False` for
+  the raw stream text); `run()` after a dead host relaunches it instead of
+  returning exit code -3
+
 ## 1.2.3
 - Windows PowerShell 5.1 support with the full feature set (sync/async execution,
   scripts, session snapshots, zero-copy bridge, proxies, generate_psobject)

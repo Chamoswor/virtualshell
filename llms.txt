@@ -1,0 +1,50 @@
+# virtualshell
+
+> Run PowerShell from Python without spawning a process per call. One warm
+> PowerShell host behind a C++ engine: persistent session, ~2-4 ms per
+> command, structured results, typed exceptions, and guardrails designed for
+> LLM agents.
+
+Use it when you need any of:
+  - a persistent pwsh session (modules, variables, auth context survive between calls)
+  - structured results (stdout, stderr, exit code, success, timing) and typed exceptions
+  - PowerShell objects as Python objects (`run_objects`, PSObject) or live typed proxies
+  - output budgets for LLM context (`max_output` + `fetch_output` paging)
+  - guardrails: allow/deny policies, read-only lanes, human confirmation, -WhatIf dry runs
+  - cancel of a runaway command without losing session state (`interrupt` + `checkpoint`)
+  - MCP-style tool schemas generated from `Get-Command` metadata
+  - fast bulk transfer of bytes between Python and PowerShell (zero-copy bridge)
+  - concurrent commands from several Python threads or agents
+
+Don't use it for one-off commands where `subprocess.run(["pwsh", "-c", ...])` is enough,
+for remote hosts (use pypsrp), or when a native Python SDK exists for the service.
+
+Quick start:
+
+    pip install virtualshell
+
+    from virtualshell import Shell
+    with Shell() as sh:
+        r = sh.run("Get-Date")        # r.out, r.err, r.success, r.exit_code
+        procs = sh.run_objects("Get-Process", select=["Name", "Id"], first=5)
+
+Requirements: Python 3.11-3.14; PowerShell 7 (`pwsh`) on PATH or Windows
+PowerShell 5.1 on Windows. Wheels for Windows/Linux/macOS, no compiler needed.
+
+## Docs
+
+- [SKILL.md](SKILL.md): compact usage guide written for LLMs - read this first
+- [README.md](README.md): overview, installation, quick start, benchmarks
+- [Agents & Guardrails](https://github.com/Chamoswor/virtualshell/wiki/Agents-&-Guardrails): output budgets, run_objects, ExecutionPolicy, interrupt/checkpoint, tool schemas
+- [API Overview](https://github.com/Chamoswor/virtualshell/wiki/API-Overview): every method and property on Shell
+- [Configuration](https://github.com/Chamoswor/virtualshell/wiki/Configuration): constructor options, editions, inspecting the host
+- [Error Handling](https://github.com/Chamoswor/virtualshell/wiki/Error-Handling): timeouts, crashes, blocked prompts, policy violations
+- [Zero-Copy Bridge](https://github.com/Chamoswor/virtualshell/wiki/Zero-Copy-Bridge): shared-memory bulk transfer
+- [make_proxy](https://github.com/Chamoswor/virtualshell/wiki/make_proxy) and [generate_psobject](https://github.com/Chamoswor/virtualshell/wiki/generate_psobject): live .NET object proxies and typed Protocol stubs
+
+## Optional
+
+- [Asynchronous Execution](https://github.com/Chamoswor/virtualshell/wiki/Asynchronous-Execution)
+- [Running Scripts](https://github.com/Chamoswor/virtualshell/wiki/Running-Scripts)
+- [Performance Tips](https://github.com/Chamoswor/virtualshell/wiki/Performance-Tips) and [Benchmarks](https://github.com/Chamoswor/virtualshell/wiki/Benchmarks)
+- [Design & Architecture](https://github.com/Chamoswor/virtualshell/wiki/Design-&-Architecture)
