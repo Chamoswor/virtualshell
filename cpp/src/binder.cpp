@@ -149,6 +149,7 @@ PYBIND11_MODULE(_core, m) {
     py::class_<VirtualShell::Config>(m, "Config")
         .def(py::init<>())
         .def_readwrite("powershell_path",      &VirtualShell::Config::powershellPath)
+        .def_readwrite("powershell_edition",   &VirtualShell::Config::powershellEdition)
         .def_readwrite("working_directory",    &VirtualShell::Config::workingDirectory)
         .def_readwrite("capture_output",       &VirtualShell::Config::captureOutput)
         .def_readwrite("capture_error",        &VirtualShell::Config::captureError)
@@ -161,6 +162,7 @@ PYBIND11_MODULE(_core, m) {
         .def_readwrite("stdin_buffer_size",    &VirtualShell::Config::stdin_buffer_size)
         .def("__repr__", [](const VirtualShell::Config& c) {
             return "<Config powershell_path='" + c.powershellPath +
+                   "' powershell_edition='" + c.powershellEdition +
                    "' timeout=" + std::to_string(c.timeoutSeconds) + "s>";
         });
 
@@ -241,6 +243,10 @@ PYBIND11_MODULE(_core, m) {
         .def("is_module_available", &VirtualShell::isModuleAvailable, py::arg("module_name"))
         .def("import_module",      &VirtualShell::importModule,      py::arg("module_name"))
         .def("get_powershell_version", &VirtualShell::getPowerShellVersion)
+        .def("get_powershell_edition", &VirtualShell::getPowerShellEdition,
+             "Edition of the running host: 'core' (pwsh) or 'desktop' (Windows PowerShell 5.1)")
+        .def("get_resolved_powershell_path", &VirtualShell::getResolvedPowerShellPath,
+             "Executable launched by the most recent start() (empty before the first start)")
         .def("get_available_modules",  &VirtualShell::getAvailableModules)
 
         .def("get_config",   &VirtualShell::getConfig, py::return_value_policy::reference_internal)

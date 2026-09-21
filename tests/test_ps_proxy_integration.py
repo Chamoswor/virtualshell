@@ -1,11 +1,11 @@
-"""Integration tests for the reworked PsProxy against real pwsh.
+"""Integration tests for the reworked PsProxy against a real PowerShell host.
 
 Covers scalar fidelity, byte[] transfers via the zero-copy bridge,
 out-buffers, sub-proxies, property writes, error paths and the schema API.
+Runs once per installed edition (pwsh and Windows PowerShell 5.1).
 """
 from __future__ import annotations
 
-import shutil
 from datetime import datetime, timedelta
 
 import pytest
@@ -13,26 +13,16 @@ import pytest
 from virtualshell.errors import ExecutionError
 from virtualshell.ps_object import PSObject
 
+from conftest import integration
 
-def _real_core_available() -> bool:
-    try:
-        import virtualshell._core as core
-    except ImportError:
-        return False
-    return not getattr(core, "__vs_stub__", False)
-
-
-pytestmark = pytest.mark.skipif(
-    not (_real_core_available() and shutil.which("pwsh")),
-    reason="requires the compiled _core extension and pwsh on PATH",
-)
+pytestmark = integration
 
 
 @pytest.fixture(scope="module")
-def shell():
+def shell(edition):
     from virtualshell import Shell
 
-    sh = Shell(timeout_seconds=60).start()
+    sh = Shell(timeout_seconds=60, powershell_edition=edition).start()
     yield sh
     sh.stop(force=True)
 

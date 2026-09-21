@@ -48,7 +48,8 @@ class BatchProgressLike(Protocol):
 
 @runtime_checkable
 class ConfigLike(Protocol):
-    powershell_path: str = "pwsh"
+    powershell_path: str = ""          # empty: resolved from powershell_edition at start()
+    powershell_edition: str = "auto"   # "auto" | "core" (pwsh) | "desktop" (Windows PowerShell 5.1)
     working_directory: str = ""
     capture_output: bool = True
     capture_error: bool = True
@@ -187,6 +188,14 @@ class VirtualShellLike(Protocol):
         ...
 
     def get_powershell_version(self) -> str:
+        ...
+
+    def get_powershell_edition(self) -> str:
+        """'core' (pwsh) or 'desktop' (Windows PowerShell 5.1); empty on failure."""
+        ...
+
+    def get_resolved_powershell_path(self) -> str:
+        """Executable launched by the most recent start() (empty before the first start)."""
         ...
 
     def get_available_modules(self) -> List[str]:

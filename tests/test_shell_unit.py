@@ -32,6 +32,42 @@ class TestConfigWiring:
         assert cfg.stdin_buffer_size == 64 * 1024
         assert cfg.initial_commands == [UTF8_COMMAND]
         assert cfg.powershell_path == ""  # backend resolves the executable
+        assert cfg.powershell_edition == "auto"
+
+    @pytest.mark.parametrize("given,expected", [
+        ("auto", "auto"),
+        ("core", "core"),
+        ("Desktop", "desktop"),
+        (" PWSH ", "core"),
+        ("powershell", "desktop"),
+        ("windows", "desktop"),
+        (None, "auto"),
+    ])
+    def test_edition_is_normalized(self, fake_core, monkeypatch, given, expected):
+        monkeypatch.setattr("virtualshell.shell._IS_WINDOWS", True)
+        Shell(powershell_edition=given, cpp_module=fake_core)
+        assert fake_core.last_shell.cfg.powershell_edition == expected
+
+    def test_invalid_edition_is_rejected(self, fake_core):
+        with pytest.raises(ValueError, match="powershell_edition"):
+            Shell(powershell_edition="powershell9", cpp_module=fake_core)
+
+    def test_desktop_edition_requires_windows(self, fake_core, monkeypatch):
+        monkeypatch.setattr("virtualshell.shell._IS_WINDOWS", False)
+        with pytest.raises(ValueError, match="Windows"):
+            Shell(powershell_edition="desktop", cpp_module=fake_core)
+        # core/auto remain valid everywhere
+        Shell(powershell_edition="core", cpp_module=fake_core)
+        Shell(powershell_edition="auto", cpp_module=fake_core)
+
+    def test_explicit_path_and_edition_are_both_forwarded(self, fake_core, monkeypatch):
+        monkeypatch.setattr("virtualshell.shell._IS_WINDOWS", True)
+        sh = Shell(powershell_path="C:/tools/pwsh.exe", powershell_edition="desktop",
+                   cpp_module=fake_core)
+        cfg = fake_core.last_shell.cfg
+        assert cfg.powershell_path == "C:/tools/pwsh.exe"   # the backend lets the path win
+        assert cfg.powershell_edition == "desktop"
+        assert sh.configured_edition == "desktop"
 
     def test_explicit_values(self, fake_core, tmp_path):
         Shell(
@@ -367,3 +403,50 @@ class TestConvenience:
         assert repr(sh) == "<Shell running=0>"
         sh.start()
         assert repr(sh) == "<Shell running=1>"
+
+
+class TestEditionDetection:
+    def test_edition_property_starts_backend_and_caches(self, fake_core):
+        sh = Shell(cpp_module=fake_core)
+        fake = fake_core.last_shell
+        fake.edition_result = "desktop"
+        assert sh.edition == "desktop"
+        assert fake.alive                       # auto-started, like make_proxy()
+        assert sh.edition == "desktop"
+        assert fake.calls.count(("get_powershell_edition",)) == 1
+
+    def test_stop_clears_cached_edition_and_version(self, fake_core):
+        sh = Shell(cpp_module=fake_core)
+        fake = fake_core.last_shell
+        assert sh.edition == "core"
+        assert sh.powershell_version == "7.6.6"
+        sh.stop()
+        fake.edition_result = "desktop"
+        fake.version_result = "5.1.22621.4391"
+        assert sh.edition == "desktop"
+        assert sh.powershell_version == "5.1.22621.4391"
+
+    def test_unrecognised_edition_raises(self, fake_core):
+        sh = Shell(cpp_module=fake_core)
+        fake_core.last_shell.edition_result = ""
+        with pytest.raises(VirtualShellError):
+            _ = sh.edition
+
+    def test_powershell_path_reports_resolved_executable(self, fake_core):
+        sh = Shell(cpp_module=fake_core)
+        assert sh.powershell_path == ""          # nothing resolved before start()
+        sh.start()
+        assert sh.powershell_path == "C:/fake/pwsh.exe"
+        sh.stop()
+        assert sh.powershell_path == ""
+
+    def test_powershell_path_falls_back_to_configured_path(self, fake_core):
+        sh = Shell(powershell_path="C:/tools/pwsh.exe", cpp_module=fake_core)
+        assert sh.powershell_path == "C:/tools/pwsh.exe"
+
+    def test_start_failure_message_names_edition(self, fake_core, monkeypatch):
+        monkeypatch.setattr("virtualshell.shell._IS_WINDOWS", True)
+        sh = Shell(powershell_edition="desktop", cpp_module=fake_core)
+        fake_core.last_shell.start_result = False
+        with pytest.raises(PowerShellNotFoundError, match="Windows PowerShell 5.1"):
+            sh.start()

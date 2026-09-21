@@ -2,14 +2,14 @@
 
 **Prerequisites**
 - Python ≥ 3.10
-- PowerShell available on PATH:
-  - Recommended: PowerShell 7+ (`pwsh`)
-  - Windows PowerShell also works (`powershell`)
+- A PowerShell host:
+  - Recommended: PowerShell 7+ (`pwsh`) on PATH – all platforms
+  - Windows PowerShell 5.1 (`powershell.exe`) – Windows only, used automatically when `pwsh` is missing, or on request via `Shell(powershell_edition="desktop")`
 - OS: Windows, Linux, or macOS
 
 **Verify PowerShell**
 ```bash
-pwsh -v   # or: powershell -v
+pwsh -v   # or, on Windows: powershell -NoProfile -Command '$PSVersionTable.PSVersion'
 ```
 
 **Install**

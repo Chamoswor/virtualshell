@@ -2,8 +2,6 @@
 Protocol generation (unit), plus end-to-end generation against pwsh."""
 from __future__ import annotations
 
-import shutil
-
 import pytest
 
 from virtualshell.generate_psobject import (
@@ -292,25 +290,14 @@ class TestStaticRendering:
 # Integration
 # =============================================================================
 
-def _real_core_available() -> bool:
-    try:
-        import virtualshell._core as core
-    except ImportError:
-        return False
-    return not getattr(core, "__vs_stub__", False)
-
-
-integration = pytest.mark.skipif(
-    not (_real_core_available() and shutil.which("pwsh")),
-    reason="requires the compiled _core extension and pwsh on PATH",
-)
+from conftest import integration  # noqa: E402  (pwsh and/or Windows PowerShell 5.1)
 
 
 @pytest.fixture(scope="module")
-def shell():
+def shell(edition):
     from virtualshell import Shell
 
-    sh = Shell(timeout_seconds=60).start()
+    sh = Shell(timeout_seconds=60, powershell_edition=edition).start()
     yield sh
     sh.stop(force=True)
 

@@ -4,6 +4,7 @@
 #include "config.hpp"
 #include "execution_result.hpp"
 #include "helpers.hpp"
+#include "ps_locator.hpp"
 
 using virtualshell::helpers::parsers::ps_quote;
 using virtualshell::helpers::parsers::trim_inplace;
@@ -97,7 +98,8 @@ TEST_CASE("normalizeToUtf8 passes valid UTF-8 through and repairs the rest") {
 
 TEST_CASE("Config defaults match the documented contract") {
     virtualshell::core::Config cfg;
-    CHECK_EQ(cfg.powershellPath, "pwsh");
+    CHECK_EQ(cfg.powershellPath, "");        // resolved from the edition at start()
+    CHECK_EQ(cfg.powershellEdition, "auto");
     CHECK_EQ(cfg.workingDirectory, "");
     CHECK(cfg.captureOutput);
     CHECK(cfg.captureError);
@@ -124,3 +126,60 @@ TEST_CASE("BatchProgress default-constructs empty") {
     CHECK(!prog.isComplete);
     CHECK(prog.allResults.empty());
 }
+
+// ---------- executable resolution (ps_locator.hpp) ----------
+
+TEST_CASE("normalizeEdition accepts the three editions case-insensitively") {
+    using virtualshell::helpers::locator::normalizeEdition;
+    CHECK_EQ(normalizeEdition("auto"), "auto");
+    CHECK_EQ(normalizeEdition(" Core "), "core");
+    CHECK_EQ(normalizeEdition("DESKTOP"), "desktop");
+    CHECK_EQ(normalizeEdition("pwsh"), "");       // aliases live in the Python layer
+    CHECK_EQ(normalizeEdition(""), "");
+}
+
+TEST_CASE("resolveExecutable: an explicit path always wins") {
+    using virtualshell::helpers::locator::resolveExecutable;
+    auto r = resolveExecutable("C:/tools/custom-pwsh.exe", "desktop");
+    CHECK(r.has_value());
+    CHECK_EQ(*r, "C:/tools/custom-pwsh.exe");
+}
+
+TEST_CASE("resolveExecutable: unknown edition yields nothing") {
+    using virtualshell::helpers::locator::resolveExecutable;
+    CHECK(!resolveExecutable("", "powershell9").has_value());
+}
+
+TEST_CASE("resolveExecutable: core and auto always produce a pwsh candidate") {
+    using virtualshell::helpers::locator::resolveExecutable;
+    auto core = resolveExecutable("", "core");
+    CHECK(core.has_value());
+    CHECK(core->find("pwsh") != std::string::npos);
+    auto automatic = resolveExecutable("", "auto");
+    CHECK(automatic.has_value());
+    CHECK(!automatic->empty());
+}
+
+#ifdef _WIN32
+TEST_CASE("resolveExecutable: desktop resolves to powershell.exe on Windows") {
+    using virtualshell::helpers::locator::resolveExecutable;
+    auto r = resolveExecutable("", "desktop");
+    CHECK(r.has_value());
+    CHECK(r->find("powershell") != std::string::npos);
+    // The canonical location is %SystemRoot%\System32\WindowsPowerShell\v1.0;
+    // a mangled literal (e.g. "\v" read as a vertical tab) must not slip
+    // through via the PATH-search fallback.
+    for (char ch : *r) {
+        CHECK(static_cast<unsigned char>(ch) >= 0x20);
+    }
+    std::string lowered = *r;
+    for (auto& ch : lowered) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    CHECK(lowered.find("\\system32\\windowspowershell\\v1.0\\powershell.exe") != std::string::npos);
+}
+#else
+TEST_CASE("resolveExecutable: desktop is unavailable off Windows") {
+    using virtualshell::helpers::locator::resolveExecutable;
+    CHECK(!resolveExecutable("", "desktop").has_value());
+    CHECK(!virtualshell::helpers::locator::findWindowsPowerShell().has_value());
+}
+#endif

@@ -10,7 +10,8 @@ namespace core {
  * @brief Runtime configuration supplied to the VirtualShell engine.
  */
 struct Config {
-	std::string powershellPath{"pwsh"};     ///< Absolute or relative path to the PowerShell executable
+	std::string powershellPath{""};         ///< Explicit PowerShell executable; empty = resolve from powershellEdition
+	std::string powershellEdition{"auto"};  ///< "auto" (pwsh, else Windows PowerShell on Windows), "core" (pwsh) or "desktop" (Windows PowerShell 5.1, Windows only)
 	std::string workingDirectory{""};       ///< Working directory for the child process (empty = current)
 	bool captureOutput{true};               ///< Capture stdout content produced by commands
 	bool captureError{true};                ///< Capture stderr content produced by commands

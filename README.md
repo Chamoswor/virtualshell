@@ -49,8 +49,10 @@ CI/test harnesses, and automation tooling that must be fast and reliable.
 ## Requirements
 
 * **Python 3.11 – 3.14**
-* **PowerShell 7** (`pwsh`) on `PATH`, unless an explicit path is passed in
-  the configuration
+* **PowerShell 7** (`pwsh`) on `PATH`, or **Windows PowerShell 5.1** on
+  Windows. By default the backend prefers `pwsh` and falls back to Windows
+  PowerShell; see [PowerShell editions](#powershell-editions) to pin one, or
+  pass `powershell_path` to use a specific executable.
 
 ## Installation
 
@@ -210,7 +212,8 @@ See the `make_proxy` and `generate_psobject` pages in the wiki.
 
 ```python
 Shell(
-    powershell_path="C:/Program Files/PowerShell/7/pwsh.exe",
+    powershell_edition="core",   # "auto" (default) | "core" (pwsh) | "desktop" (Windows PowerShell 5.1)
+    powershell_path="C:/Program Files/PowerShell/7/pwsh.exe",  # optional; overrides the edition
     working_directory="C:/automation",
     environment={"MY_FLAG": "1"},
     timeout_seconds=10,
@@ -221,6 +224,37 @@ Shell(
     ],
 )
 ```
+
+## PowerShell editions
+
+Both PowerShell 7+ (`pwsh`, all platforms) and Windows PowerShell 5.1
+(`powershell.exe`, Windows only) are supported with the full feature set:
+sync/async execution, scripts, session snapshots, the zero-copy bridge,
+object proxies and `Protocol` generation. Pick the host with
+`powershell_edition`:
+
+| `powershell_edition` | Launches                                                   |
+| -------------------- | ---------------------------------------------------------- |
+| `"auto"` (default)   | `pwsh` if it can be found, otherwise Windows PowerShell 5.1 on Windows |
+| `"core"`             | `pwsh` (PowerShell 7+)                                     |
+| `"desktop"`          | Windows PowerShell 5.1; raises `ValueError` off Windows    |
+
+The aliases `"pwsh"` and `"powershell"` are accepted. An explicit
+`powershell_path` always wins over the edition.
+
+```python
+from virtualshell import Shell
+
+with Shell(powershell_edition="desktop") as sh:
+    print(sh.edition)             # -> "desktop"
+    print(sh.powershell_version)  # -> "5.1.22621.4391"
+    print(sh.powershell_path)     # -> C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+```
+
+`shell.edition` reports what is actually running (`"core"` or `"desktop"`),
+so code that needs PowerShell 7 syntax can branch on it. Note that the two
+hosts differ in the usual ways: Windows PowerShell has no `$PSStyle`, no
+ternary/null-coalescing operators, and formats errors differently.
 
 ## Performance
 

@@ -581,7 +581,9 @@ def generate(shell, obj: str, output_path: Path) -> None:
     if (not shell.is_running):
         shell.start()
         shell_needs_stop = True
-    shell.run("$PSStyle.OutputRendering = 'PlainText'", raise_on_error=False)
+    # $PSStyle only exists in PowerShell 7+; Windows PowerShell 5.1 never emits ANSI.
+    if getattr(shell, "edition", "core") == "core":
+        shell.run("$PSStyle.OutputRendering = 'PlainText'", raise_on_error=False)
     shell.run("$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()", raise_on_error=False)
 
     from .ps_proxy import build_creation_strategies, static_type_literal

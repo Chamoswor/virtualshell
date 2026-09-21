@@ -5,7 +5,7 @@
 ## Prerequisites
 
 - Install the `virtualshell` package and ensure the native extension is built.
-- PowerShell 7 has to be available in `PATH`, or you must pass an explicit `powershell_path` to `Shell`.
+- A PowerShell host: `pwsh` (PowerShell 7+) on `PATH`, Windows PowerShell 5.1 on Windows, or an explicit `powershell_path` passed to `Shell`. Generation works on both editions; the reflected members naturally follow the .NET runtime of the host (.NET Framework 4.x under Windows PowerShell).
 - The object you want to reflect must be constructible in the current PowerShell session (for example `System.Net.WebClient` or `[System.IO.StreamReader]::new('file.txt')`).
 
 ## Quick Start
@@ -33,7 +33,7 @@ If all strategies fail to materialise an object, a `RuntimeError` is raised list
 ## Customising Behaviour
 
 - **Timeouts:** Pass a higher `timeout_seconds` when constructing the shell if the target object takes time to create.
-- **PowerShell path:** Use `Shell(powershell_path="C:/Program Files/PowerShell/7/pwsh.exe")` to reference a specific installation.
+- **PowerShell host:** Use `Shell(powershell_edition="core")` / `"desktop"` to pick pwsh or Windows PowerShell 5.1, or `Shell(powershell_path="C:/Program Files/PowerShell/7/pwsh.exe")` to reference a specific installation.
 - **Result stripping:** `strip_results=True` trims trailing whitespace from PowerShell output; it is optional but helpful for clean JSON parsing.
 
 ## Using the Generated Protocol

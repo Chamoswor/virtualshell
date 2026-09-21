@@ -1,7 +1,9 @@
 #include "../include/virtual_shell.hpp"
 #include "../include/powershell_process.hpp"
 #include "../include/helpers.hpp"
+#include "../include/ps_locator.hpp"
 #include "../include/dev_debug.hpp"
+#include <cctype>
 #include <chrono>
 #include <algorithm>
 #include <fstream>
@@ -58,6 +60,7 @@ VirtualShell::VirtualShell(VirtualShell&& other) noexcept
 
     lastOutput = std::move(other.lastOutput);
     lastError = std::move(other.lastError);
+    resolvedPowerShellPath_ = std::move(other.resolvedPowerShellPath_);
 
     seq_.store(other.seq_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     inflightCount_.store(other.inflightCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -107,6 +110,7 @@ VirtualShell& VirtualShell::operator=(VirtualShell&& other) noexcept {
 
     lastOutput = std::move(other.lastOutput);
     lastError = std::move(other.lastError);
+    resolvedPowerShellPath_ = std::move(other.resolvedPowerShellPath_);
 
     seq_.store(other.seq_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     inflightCount_.store(other.inflightCount_.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -178,10 +182,20 @@ bool VirtualShell::start() {
         return false;
     }
 
-    VSHELL_DBG("LIFECYCLE", "start() pwsh_path='%s'", config.powershellPath.c_str());
+    // An explicit path wins; otherwise pick pwsh / powershell.exe by edition.
+    auto executable = virtualshell::helpers::locator::resolveExecutable(
+        config.powershellPath, config.powershellEdition);
+    if (!executable) {
+        VSHELL_DBG("LIFECYCLE", "start() cannot resolve executable (path='%s' edition='%s')",
+                   config.powershellPath.c_str(), config.powershellEdition.c_str());
+        return false;
+    }
+    resolvedPowerShellPath_ = *executable;
+    VSHELL_DBG("LIFECYCLE", "start() edition='%s' exe='%s'",
+               config.powershellEdition.c_str(), resolvedPowerShellPath_.c_str());
 
     virtualshell::core::ProcessConfig procCfg;
-    procCfg.powershell_path = config.powershellPath;
+    procCfg.powershell_path = resolvedPowerShellPath_;
     procCfg.working_directory = config.workingDirectory;
     procCfg.environment = config.environment;
     procCfg.stdin_buffer_size = config.stdin_buffer_size;
@@ -818,6 +832,20 @@ std::string VirtualShell::getPowerShellVersion() {
         return version;
     }
     return "";
+}
+
+std::string VirtualShell::getPowerShellEdition() {
+    // PSEdition exists from 5.1 on; anything older that lacks it is Windows PowerShell.
+    ExecutionResult result = execute(
+        "if ($PSVersionTable.PSEdition) { $PSVersionTable.PSEdition } "
+        "elseif ($PSVersionTable.PSVersion.Major -ge 6) { 'Core' } else { 'Desktop' }");
+    if (!result.success) return "";
+    std::string edition = result.out;
+    virtualshell::helpers::parsers::trim_inplace(edition);
+    for (auto& ch : edition) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return edition; // "core" | "desktop"
 }
 
 std::vector<std::string> VirtualShell::getAvailableModules() {

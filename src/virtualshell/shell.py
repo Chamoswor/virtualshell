@@ -7,6 +7,7 @@ into Python-friendly exceptions.
 """
 from __future__ import annotations
 
+import os
 import secrets
 import tempfile
 import time
@@ -23,6 +24,40 @@ if TYPE_CHECKING:
     from .ps_proxy import PsProxy
 
 _ProxyProtocol = TypeVar("_ProxyProtocol")
+
+_IS_WINDOWS = os.name == "nt"
+
+#: Canonical values for ``Shell(powershell_edition=...)``.
+#: - "auto":    pwsh (PowerShell 7+) when found, otherwise Windows PowerShell on Windows
+#: - "core":    pwsh (PowerShell 7+), all platforms
+#: - "desktop": Windows PowerShell 5.1 (powershell.exe), Windows only
+POWERSHELL_EDITIONS = ("auto", "core", "desktop")
+
+_EDITION_ALIASES = {
+    "auto": "auto",
+    "core": "core",
+    "pwsh": "core",
+    "desktop": "desktop",
+    "powershell": "desktop",
+    "windows": "desktop",
+}
+
+
+def normalize_powershell_edition(value: Any) -> str:
+    """Map a user-supplied edition name onto one of ``POWERSHELL_EDITIONS``.
+
+    Accepts the canonical names plus the executable-style aliases ``pwsh``
+    (core) and ``powershell`` / ``windows`` (desktop), case-insensitively.
+    Raises ``ValueError`` for anything else.
+    """
+    text = str(value if value is not None else "auto").strip().lower()
+    edition = _EDITION_ALIASES.get(text or "auto")
+    if edition is None:
+        raise ValueError(
+            f"Invalid powershell_edition {value!r}; expected one of "
+            + ", ".join(repr(e) for e in POWERSHELL_EDITIONS)
+            + " (aliases: 'pwsh', 'powershell', 'windows')")
+    return edition
 
 # ---------- Exceptions ----------
 # Narrow, typed exceptions help callers implement precise retry/telemetry policies.
@@ -118,6 +153,7 @@ class Shell:
         initial_commands: Optional[List[str]] = None,
         set_UTF8: bool = True,
         strip_results: bool = False,
+        powershell_edition: str = "auto",
         cpp_module: Any = None,
     ) -> None:
         """Configure a new Shell instance.
@@ -125,7 +161,8 @@ class Shell:
         Parameters
         ----------
         powershell_path : Optional[str]
-            Explicit path to `pwsh`/`powershell`. If omitted, the backend resolves it.
+            Explicit path to `pwsh`/`powershell`. If omitted, the backend resolves it
+            from `powershell_edition`.
         working_directory : Optional[Union[str, Path]]
             Working directory for the child process. Resolved to an absolute path.
         timeout_seconds : float
@@ -148,6 +185,16 @@ class Shell:
         strip_results : bool
             If True, automatically strip leading/trailing whitespace from `out` and `err`, only
             when as_dataclass=True is used. Default is False.
+        powershell_edition : str
+            Which PowerShell to host when `powershell_path` is not given:
+            ``"auto"`` (default) launches `pwsh` (PowerShell 7+) when it can be found and
+            otherwise falls back to Windows PowerShell 5.1 on Windows; ``"core"`` always
+            launches `pwsh`; ``"desktop"`` always launches Windows PowerShell 5.1
+            (`powershell.exe`, Windows only - raises ValueError elsewhere). The aliases
+            ``"pwsh"`` and ``"powershell"`` are accepted. Every feature (sync/async
+            execution, scripts, session snapshots, the zero-copy bridge, proxies and
+            stub generation) works on both editions; see `Shell.edition` for what is
+            actually running.
         cpp_module : Any
             For testing/DI: provide a custom module exposing the C++ API surface.
         """
@@ -155,6 +202,12 @@ class Shell:
         cfg: Config = mod.Config()
         if powershell_path:
             cfg.powershell_path = str(powershell_path)
+        edition = normalize_powershell_edition(powershell_edition)
+        if edition == "desktop" and not _IS_WINDOWS:
+            raise ValueError(
+                "powershell_edition='desktop' selects Windows PowerShell 5.1, which only "
+                "exists on Windows; use 'core' (pwsh) or 'auto' on this platform")
+        cfg.powershell_edition = edition
         if working_directory:
             cfg.working_directory = str(Path(working_directory).resolve())
         cfg.timeout_seconds = int(timeout_seconds or 0)
@@ -190,6 +243,9 @@ class Shell:
         self._strip_results = bool(strip_results)
         self._raise_on_timeout = not bool(auto_restart_on_timeout)
         self._pwsh_mem_init = False
+        # Detected from the running host on first use; cleared by stop().
+        self._edition: Optional[str] = None
+        self._version: Optional[str] = None
         self.pid: Optional[int] = None
     
     @property
@@ -234,8 +290,13 @@ class Shell:
             return self
 
         # Backend could not start the process; provide a precise error.
+        edition = self._cfg.powershell_edition
+        target = self._cfg.powershell_path or {
+            "core": "pwsh (PowerShell 7+)",
+            "desktop": "Windows PowerShell 5.1 (powershell.exe)",
+        }.get(edition, "pwsh, or Windows PowerShell on Windows")
         raise PowerShellNotFoundError(
-            f"Failed to start PowerShell process. Path: '{self._cfg.powershell_path or 'pwsh/powershell'}'"
+            f"Failed to start PowerShell process. Path: '{target}' (powershell_edition='{edition}')"
         )
 
     def stop(self, force: bool = False) -> None:
@@ -250,6 +311,9 @@ class Shell:
             except Exception:
                 pass
             self._zcb = None
+        # A later start() may resolve a different executable; re-detect then.
+        self._edition = None
+        self._version = None
         try:
             self._core.stop(force)
         except Exception as e:  # Surface backend failures in a consistent type.
@@ -270,7 +334,59 @@ class Shell:
     def is_restarting(self) -> bool:
         """Return True if the backend process is restarting."""
         return bool(self._core.is_restarting())
-    
+
+    @property
+    def configured_edition(self) -> str:
+        """The `powershell_edition` this Shell was configured with ('auto', 'core' or 'desktop')."""
+        return str(self._cfg.powershell_edition)
+
+    @property
+    def edition(self) -> str:
+        """Edition of the PowerShell host that is actually running.
+
+        Returns ``"core"`` for PowerShell 7+ (`pwsh`) or ``"desktop"`` for Windows
+        PowerShell 5.1, as reported by ``$PSVersionTable.PSEdition``. Starts the
+        backend if needed; the answer is cached until `stop()`.
+        """
+        if self._edition is None:
+            self._wait_if_restarting()
+            if not self.is_running:
+                self.start()
+            detected = str(self._core.get_powershell_edition() or "").strip().lower()
+            if detected not in ("core", "desktop"):
+                raise VirtualShellError(
+                    "Could not determine the edition of the running PowerShell host")
+            self._edition = detected
+        return self._edition
+
+    @property
+    def powershell_version(self) -> str:
+        """Version of the running host (e.g. ``"7.5.3"`` or ``"5.1.22621.4391"``).
+
+        Starts the backend if needed; cached until `stop()`.
+        """
+        if self._version is None:
+            self._wait_if_restarting()
+            if not self.is_running:
+                self.start()
+            version = str(self._core.get_powershell_version() or "").strip()
+            if not version:
+                return ""
+            self._version = version
+        return self._version
+
+    @property
+    def powershell_path(self) -> str:
+        """Executable the backend launched (resolved on `start()`).
+
+        Before the first start this is the configured `powershell_path`, which is
+        empty when the executable is chosen from `powershell_edition`.
+        """
+        resolved = ""
+        if self.is_running:
+            resolved = str(self._core.get_resolved_powershell_path() or "")
+        return resolved or str(self._cfg.powershell_path)
+
     @overload
     def run(self, cmd: str, *, timeout: Optional[float]=..., raise_on_error: bool=...) -> ExecutionResult: ...
     """Execute a single PowerShell command."""

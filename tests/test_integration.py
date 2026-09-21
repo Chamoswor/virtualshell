@@ -1,36 +1,27 @@
 """Integration tests: the full stack against a real PowerShell process.
 
 These require the compiled `virtualshell._core` extension (i.e. the package
-was built/installed) and a `pwsh` executable on PATH. They skip themselves
-otherwise, so the unit tests still run on machines without a toolchain.
+was built/installed) and a PowerShell host: `pwsh` on PATH and/or Windows
+PowerShell 5.1. They run once per installed edition (see the ``edition``
+fixture in conftest.py) and skip themselves otherwise, so the unit tests
+still run on machines without a toolchain.
 """
 from __future__ import annotations
 
-import shutil
 import time
 
 import pytest
 
+from conftest import integration
 
-def _real_core_available() -> bool:
-    try:
-        import virtualshell._core as core
-    except ImportError:
-        return False
-    return not getattr(core, "__vs_stub__", False)
-
-
-pytestmark = pytest.mark.skipif(
-    not (_real_core_available() and shutil.which("pwsh")),
-    reason="requires the compiled _core extension and pwsh on PATH",
-)
+pytestmark = integration
 
 
 @pytest.fixture(scope="module")
-def shell():
+def shell(edition):
     from virtualshell import Shell
 
-    sh = Shell(timeout_seconds=30).start()
+    sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
     yield sh
     sh.stop(force=True)
 
@@ -143,31 +134,33 @@ class TestTimeoutAndRestart:
 
 
 class TestSeparateInstances:
-    def test_environment_variables(self):
+    def test_environment_variables(self, edition):
         from virtualshell import Shell
 
-        with Shell(timeout_seconds=30, environment={"VS_TEST_ENV": "hello-env"}) as sh:
+        with Shell(timeout_seconds=30, powershell_edition=edition,
+                   environment={"VS_TEST_ENV": "hello-env"}) as sh:
             res = sh.run("$env:VS_TEST_ENV")
             assert res.out.strip() == "hello-env"
 
-    def test_working_directory(self, tmp_path):
+    def test_working_directory(self, tmp_path, edition):
         from virtualshell import Shell
 
-        with Shell(timeout_seconds=30, working_directory=tmp_path) as sh:
+        with Shell(timeout_seconds=30, powershell_edition=edition,
+                   working_directory=tmp_path) as sh:
             res = sh.run("(Get-Location).Path")
             assert res.out.strip().rstrip("\\/") == str(tmp_path.resolve()).rstrip("\\/")
 
-    def test_strip_results(self):
+    def test_strip_results(self, edition):
         from virtualshell import Shell
 
-        with Shell(timeout_seconds=30, strip_results=True) as sh:
+        with Shell(timeout_seconds=30, powershell_edition=edition, strip_results=True) as sh:
             res = sh.run("Write-Output 'clean'")
             assert res.out == "clean"
 
-    def test_stop_removes_session_snapshot(self):
+    def test_stop_removes_session_snapshot(self, edition):
         from virtualshell import Shell
 
-        sh = Shell(timeout_seconds=30).start()
+        sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
         session_path = sh.session_path
         sh.save_session(timeout=60)
         assert session_path.exists()

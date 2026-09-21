@@ -33,10 +33,11 @@ class PowerShellProcess;
 #define INITIAL_COMMANDS_BUF_SIZE (8 * 1024) // 8 KB buffer for initial commands, used in sendInitialCommands()
 
 /**
- * @brief Headless PowerShell 7 process host.
+ * @brief Headless PowerShell process host.
  *
- * Start, communicate with, and control a PowerShell 7 process programmatically,
- * without showing a window.
+ * Start, communicate with, and control a PowerShell process programmatically,
+ * without showing a window. Both PowerShell 7+ (pwsh) and Windows PowerShell
+ * 5.1 (powershell.exe, Windows only) are supported; see Config::powershellEdition.
  */
 class VirtualShell : public std::enable_shared_from_this<VirtualShell> {
     /**
@@ -94,6 +95,7 @@ private:
     std::atomic<uint32_t> pendingTimeoutSentinels_{0}; ///< Expected stderr timeout sentinels to discard
 
     std::atomic<int64_t> pid_{-1}; ///< Process ID of the PowerShell host
+    std::string resolvedPowerShellPath_; ///< Executable launched by the most recent start()
 
     /**
      * @internal
@@ -165,9 +167,10 @@ public:
 
     /**
      * @brief Construct a new VirtualShell with default configuration.
-     * 
-     * Uses "pwsh.exe" from PATH, current directory, captures output,
-     * and a default timeout of 30 seconds.
+     *
+     * Resolves the executable from Config::powershellEdition ("auto": pwsh,
+     * else Windows PowerShell on Windows), uses the current directory,
+     * captures output, and applies a default timeout of 30 seconds.
      */
     inline VirtualShell() : VirtualShell(Config{}) {}
 
@@ -459,6 +462,21 @@ public:
      * @return Version string (e.g., "7.5.3")
      */
     std::string getPowerShellVersion();
+
+    /**
+     * @brief Get the edition of the running PowerShell host.
+     *
+     * @return "core" (PowerShell 7+) or "desktop" (Windows PowerShell 5.1); empty on failure
+     */
+    std::string getPowerShellEdition();
+
+    /**
+     * @brief Executable chosen by the most recent start() (empty before the first start).
+     *
+     * Reflects Config::powershellPath when set, otherwise the path resolved
+     * from Config::powershellEdition.
+     */
+    const std::string& getResolvedPowerShellPath() const { return resolvedPowerShellPath_; }
 
     /**
      * @brief Get a list of available PowerShell modules in the current session.

@@ -1,5 +1,6 @@
-// Integration tests: VirtualShell against a real PowerShell (pwsh) process.
-// Each case skips itself if pwsh cannot be started on this machine.
+// Integration tests: VirtualShell against a real PowerShell process (pwsh, or
+// Windows PowerShell 5.1 when pwsh is missing on Windows; Config default "auto").
+// Each case skips itself if no PowerShell can be started on this machine.
 #include "test_framework.hpp"
 
 #include <chrono>
@@ -29,7 +30,7 @@ Config test_config() {
 std::shared_ptr<VirtualShell> start_shell(Config cfg) {
     auto shell = std::make_shared<VirtualShell>(cfg);
     if (!shell->start()) {
-        SKIP("could not start pwsh (is PowerShell 7 on PATH?)");
+        SKIP("could not start PowerShell (is pwsh on PATH, or Windows PowerShell installed?)");
     }
     return shell;
 }
@@ -47,6 +48,47 @@ TEST_CASE("start/isAlive/stop lifecycle") {
     shell->stop();
     CHECK(!shell->isAlive());
 }
+
+TEST_CASE("start resolves an executable and reports the running edition") {
+    auto shell = start_shell(test_config());
+    CHECK(!shell->getResolvedPowerShellPath().empty());
+    const std::string edition = shell->getPowerShellEdition();
+    CHECK(edition == "core" || edition == "desktop");
+    CHECK(!shell->getPowerShellVersion().empty());
+    shell->stop();
+}
+
+#ifdef _WIN32
+TEST_CASE("desktop edition hosts Windows PowerShell 5.1") {
+    auto cfg = test_config();
+    cfg.powershellEdition = "desktop";
+    auto shell = std::make_shared<VirtualShell>(cfg);
+    if (!shell->start()) {
+        SKIP("Windows PowerShell 5.1 could not be started");
+    }
+    CHECK(contains(shell->getResolvedPowerShellPath(), "powershell"));
+    CHECK_EQ(shell->getPowerShellEdition(), "desktop");
+    CHECK(shell->getPowerShellVersion().rfind("5.", 0) == 0);
+
+    // The command protocol (markers, $? status, multi-line blocks, UTF-8) is edition-independent.
+    const std::string aoa = "\xC3\xA6\xC3\xB8\xC3\xA5";  // \u00e6\u00f8\u00e5
+    auto res = shell->execute("foreach ($i in 1..2) {\n  \"rad-$i-" + aoa + "\"\n}");
+    CHECK(res.success);
+    CHECK(contains(res.out, "rad-1-" + aoa));
+    CHECK(contains(res.out, "rad-2-" + aoa));
+    auto failing = shell->execute("Get-Item 'C:/definitely/not/here.xyz'");
+    CHECK(!failing.success);
+    shell->stop();
+}
+#else
+TEST_CASE("desktop edition cannot start off Windows") {
+    auto cfg = test_config();
+    cfg.powershellEdition = "desktop";
+    VirtualShell shell(cfg);
+    CHECK(!shell.start());
+    CHECK(!shell.isAlive());
+}
+#endif
 
 TEST_CASE("execute returns stdout, success and timing") {
     auto shell = start_shell(test_config());
