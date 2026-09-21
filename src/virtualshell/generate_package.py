@@ -28,20 +28,40 @@ from .generate_psobject import (
 
 _TYPE_GRAPH_HELPER = Path(__file__).resolve().parent / "type_graph.ps1"
 
-_GENERIC_LIST = {
+# .NET collections come back as proxies that implement len(), indexing,
+# iteration and `in` (see PsProxy), i.e. read-only Python protocols: so
+# Sequence / Mapping / AbstractSet, never List / Dict / Set, which would
+# promise append(), item assignment and the like.
+_GENERIC_SEQUENCE = {
     "System.Collections.Generic.List`1",
     "System.Collections.Generic.IList`1",
     "System.Collections.Generic.IEnumerable`1",
     "System.Collections.Generic.ICollection`1",
     "System.Collections.Generic.IReadOnlyList`1",
     "System.Collections.Generic.IReadOnlyCollection`1",
+    "System.Collections.ObjectModel.ReadOnlyCollection`1",
+    "System.Collections.ObjectModel.Collection`1",
+    "System.Collections.ObjectModel.ObservableCollection`1",
+    "System.Collections.Generic.Queue`1",
+    "System.Collections.Generic.Stack`1",
+    "System.Collections.Generic.LinkedList`1",
 }
-_GENERIC_DICT = {
+_GENERIC_MAPPING = {
     "System.Collections.Generic.Dictionary`2",
     "System.Collections.Generic.IDictionary`2",
     "System.Collections.Generic.IReadOnlyDictionary`2",
+    "System.Collections.Generic.SortedDictionary`2",
+    "System.Collections.Concurrent.ConcurrentDictionary`2",
+}
+_GENERIC_SET = {
+    "System.Collections.Generic.HashSet`1",
+    "System.Collections.Generic.ISet`1",
+    "System.Collections.Generic.SortedSet`1",
+    "System.Collections.Generic.IReadOnlySet`1",
 }
 _NULLABLE = "System.Nullable`1"
+_BYTE_ARRAYS = {"System.Byte[]", "byte[]", "Byte[]"}
+_CHAR_ARRAYS = {"System.Char[]", "char[]", "Char[]"}
 
 
 def split_generic(type_str: str) -> Optional[Tuple[str, List[str]]]:
@@ -87,18 +107,25 @@ class Annotator:
             return self.names[s]
         if s in self.enums:
             return "str"
-        if s.endswith("[]") and (s[:-2] in self.names or s[:-2] in self.enums):
-            self.typing_bits.add("List")
-            return f"List[{self(s[:-2])}]"
+        if s in _BYTE_ARRAYS:
+            return "bytes"           # byte[] travels through the bridge as bytes
+        if s in _CHAR_ARRAYS:
+            return "str"             # PowerShell binds a string to char[]
+        if s.endswith("[]"):
+            self.typing_bits.add("Sequence")
+            return f"Sequence[{self(s[:-2])}]"
         generic = split_generic(s)
         if generic:
             definition, args = generic
-            if definition in _GENERIC_LIST and len(args) == 1:
-                self.typing_bits.add("List")
-                return f"List[{self(args[0])}]"
-            if definition in _GENERIC_DICT and len(args) == 2:
-                self.typing_bits.add("Dict")
-                return f"Dict[{self(args[0])}, {self(args[1])}]"
+            if definition in _GENERIC_SEQUENCE and len(args) == 1:
+                self.typing_bits.add("Sequence")
+                return f"Sequence[{self(args[0])}]"
+            if definition in _GENERIC_MAPPING and len(args) == 2:
+                self.typing_bits.add("Mapping")
+                return f"Mapping[{self(args[0])}, {self(args[1])}]"
+            if definition in _GENERIC_SET and len(args) == 1:
+                self.typing_bits.add("AbstractSet")
+                return f"AbstractSet[{self(args[0])}]"
             if definition == _NULLABLE and len(args) == 1:
                 self.typing_bits.add("Optional")
                 return f"Optional[{self(args[0])}]"
@@ -143,6 +170,14 @@ def _sanitize_param(name: Any, index: int) -> str:
     return "self_" if safe == "self" else safe
 
 
+STATIC_TAG = "  # static"
+
+
+def _tag(line: str, entry: MutableMapping[str, Any]) -> str:
+    """Mark members that are static in .NET; proxies call them via [Type]::Name."""
+    return line + STATIC_TAG if entry.get("s") else line
+
+
 def _render_members(desc: MutableMapping[str, Any],
                     annotate: Annotator) -> Tuple[List[str], List[str]]:
     prop_lines: List[str] = []
@@ -159,13 +194,13 @@ def _render_members(desc: MutableMapping[str, Any],
             # Indexer (this[...]): callable, like a ParameterizedProperty.
             params = ", ".join(f"{_sanitize_param(p.get('n'), i)}: {annotate(p.get('t'))}"
                                for i, p in enumerate(index_params))
-            method_lines.append(f"    def {safe}(self, {params}) -> {annotation}: ...")
+            method_lines.append(_tag(f"    def {safe}(self, {params}) -> {annotation}: ...", prop))
             continue
         prop_lines.append("    @property")
-        prop_lines.append(f"    def {safe}(self) -> {annotation}: ...")
+        prop_lines.append(_tag(f"    def {safe}(self) -> {annotation}: ...", prop))
         if prop.get("w"):
             prop_lines.append(f"    @{safe}.setter")
-            prop_lines.append(f"    def {safe}(self, value: {annotation}) -> None: ...")
+            prop_lines.append(_tag(f"    def {safe}(self, value: {annotation}) -> None: ...", prop))
         prop_lines.append("")
 
     def signature(params: List[Tuple[str, str]]) -> str:
@@ -194,13 +229,13 @@ def _render_members(desc: MutableMapping[str, Any],
 
         if len(signatures) == 1:
             params, ret = signatures[0]
-            method_lines.append(f"    def {safe}(self{signature(params)}) -> {ret}: ...")
+            method_lines.append(_tag(f"    def {safe}(self{signature(params)}) -> {ret}: ...", meth))
         elif signatures:
             annotate.typing_bits.add("overload")
             for params, ret in signatures:
                 method_lines.append("    @overload")
-                method_lines.append(f"    def {safe}(self{signature(params)}) -> {ret}: ...")
-            method_lines.append(f"    def {safe}(self, *args: Any, **kwargs: Any) -> Any: ...")
+                method_lines.append(_tag(f"    def {safe}(self{signature(params)}) -> {ret}: ...", meth))
+            method_lines.append(_tag(f"    def {safe}(self, *args: Any, **kwargs: Any) -> Any: ...", meth))
             method_lines.append("")
 
     if prop_lines and prop_lines[-1] == "":
@@ -257,6 +292,8 @@ def render_type_module(desc: MutableMapping[str, Any], class_name: str,
         lines.append("")
     lines += [
         "    def proxy_multi_call(self, func: Callable[..., Any], *args: Any) -> List[Any]: ...",
+        "    def proxy_select(self, *expressions: str, **aliases: str) -> List[Dict[str, Any]]: ...",
+        "    def generic(self, name: str, *type_args: Any) -> Callable[..., Any]: ...",
         "    def proxy_schema(self) -> Dict[str, Any]: ...",
         "",
         "    @property",

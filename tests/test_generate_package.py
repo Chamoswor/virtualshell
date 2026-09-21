@@ -12,6 +12,7 @@ import sys
 
 import pytest
 
+from virtualshell.errors import ExecutionError
 from virtualshell.generate_package import (
     Annotator,
     allocate_class_names,
@@ -43,16 +44,23 @@ class TestAnnotator:
         a = Annotator(names, enums={"Vs.Mode"})
         assert a("Vs.Project") == "Project"
         assert a("Vs.Mode") == "str"
-        assert a("Vs.Project[]") == "List[Project]"
-        assert a("System.Collections.Generic.IEnumerable`1[Vs.Project]") == "List[Project]"
+        # Collections are proxies with len()/[]/iter/in: read-only protocols.
+        assert a("Vs.Project[]") == "Sequence[Project]"
+        assert a("System.Collections.Generic.IEnumerable`1[Vs.Project]") == "Sequence[Project]"
+        assert a("System.Collections.ObjectModel.ReadOnlyCollection`1[Vs.Project]") == \
+            "Sequence[Project]"
         assert a("System.Collections.Generic.Dictionary`2[System.String,Vs.Project]") == \
-            "Dict[str, Project]"
+            "Mapping[str, Project]"
+        assert a("System.Collections.Generic.HashSet`1[System.String]") == "AbstractSet[str]"
+        assert a("System.Byte[]") == "bytes"
+        assert a("System.Char[]") == "str"
+        assert a("System.Int32[]") == "Sequence[int]"
         assert a("System.Nullable`1[System.Int32]") == "Optional[int]"
         assert a("System.String") == "str"
         assert a("System.Void") == "None"
         assert a("System.IO.FileInfo") == "Any"          # runtime type: not followed
         assert a.imports == {"Project"}
-        assert {"List", "Dict", "Optional"} <= a.typing_bits
+        assert {"Sequence", "Mapping", "AbstractSet", "Optional"} <= a.typing_bits
 
 
 class TestAllocateClassNames:
@@ -131,6 +139,11 @@ _GRAPH_CS = (
     "public class Portal { ProjectSet _set = new ProjectSet(); "
     "  public ProjectSet Projects { get { return _set; } } "
     "  public Proc GetProcess() { return new Proc(); } "
+    "  public static Proc[] GetProcesses() { return new Proc[] { new Proc() }; } "
+    "  public static int Version { get { return 7; } } "
+    "  public T GetService<T>() where T : new() { return new T(); } "
+    "  public T Echo<T>(T value) { return value; } "
+    "  public static T Default<T>() { return default(T); } "
     "  public VsOther.Extra Extra { get { return new VsOther.Extra(); } } "
     "  public Mode Mode { get { return Mode.B; } } } }"
 )
@@ -183,11 +196,15 @@ class TestGeneratePackage:
         assert "    def Projects(self) -> ProjectSet: ..." in portal_src
         assert "    def GetProcess(self) -> Proc: ..." in portal_src
         assert "    def Mode(self) -> str: ..." in portal_src                 # enum
+        # Static members are emitted too, tagged, and callable on the instance proxy.
+        assert "    def GetProcesses(self) -> Sequence[Proc]: ...  # static" in portal_src
+        assert "    def Version(self) -> int: ...  # static" in portal_src
+        assert "ReferenceEquals" not in portal_src                          # Object's statics skipped
         assert "__ps_expression__: ClassVar[str] = '[VsGraph.Portal]::new()'" in portal_src
         set_src = (pkg / "ProjectSet.py").read_text(encoding="utf-8")
         assert "    def Item(self, index: int) -> Project: ..." in set_src
         assert "    def Open(self, path: str) -> Project: ..." in set_src
-        assert "    def All(self) -> List[Project]: ..." in set_src
+        assert "    def All(self) -> Sequence[Project]: ..." in set_src
         project_src = (pkg / "Project.py").read_text(encoding="utf-8")
         assert "    def Parent(self) -> ProjectSet: ..." in project_src
         assert "__ps_expression__" not in project_src                          # via a parent
@@ -203,6 +220,39 @@ class TestGeneratePackage:
                 assert portal.Projects.Open("second").Parent is None
                 assert portal.Projects.Count == 2
                 assert portal.Mode == "B"
+                # Sequence protocol on the proxy: what Sequence[Project] promises.
+                projects = portal.Projects
+                assert len(projects) == 2
+                assert [p.Name for p in projects] == ["first", "second"]
+                assert projects[-1].Name == "second"
+                assert projects[1].ps_origin.endswith(".Item(1)")
+                everything = portal.Projects.All()             # IEnumerable<Project>
+                assert [p.Name for p in everything] == ["first", "second"]
+                # Statics through the instance proxy, Python style.
+                assert portal.Version == 7
+                processes = portal.GetProcesses()
+                assert len(processes) == 1 and processes[0].Id == 42
+
+                # Generic methods: one round trip, MethodInfo cached per type.
+                proc = portal.generic("GetService", sdk.Proc)()      # GetService<Proc>()
+                assert proc.type_name == "VsGraph.Proc" and proc.Id == 42
+                assert portal.generic("Echo", "System.String")("hei") == "hei"
+                assert portal.generic("Echo", "[System.Int32]")(5) == 5
+                assert portal.generic("Default", "System.Int32")() == 0   # static generic
+                key = ("VsGraph.Portal", "GetService", ("VsGraph.Proc",), 0)
+                assert key in fresh._generic_methods
+                cached = fresh._generic_methods[key]
+                assert portal.generic("GetService", sdk.Proc)().Id == 42
+                assert fresh._generic_methods[key] == cached            # reused, not re-resolved
+                with pytest.raises(ExecutionError, match="No generic method"):
+                    portal.generic("Nope", "System.String")()
+                with pytest.raises(ExecutionError, match="Type argument not found"):
+                    portal.generic("Echo", "No.Such.Type")(1)
+
+                # Bulk read of a collection in one round trip.
+                rows = portal.Projects.proxy_select("Name", type="GetType().FullName")
+                assert rows == [{"Name": "first", "type": "VsGraph.Project"},
+                                {"Name": "second", "type": "VsGraph.Project"}]
                 with pytest.raises(TypeError, match="parent"):
                     fresh.make_proxy(sdk.Project)                 # no creation expression
                 bound = fresh.make_proxy(sdk.ProjectSet, f"{portal.ps_ref}.Projects")

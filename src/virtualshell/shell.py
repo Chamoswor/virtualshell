@@ -248,6 +248,9 @@ class Shell:
         self._version: Optional[str] = None
         # proxy variable -> expression it was reached by (see PsProxy.ps_origin)
         self._proxy_origins: Dict[str, str] = {}
+        # (runtime type, method, type args, arg count) -> session variable
+        # holding the closed MethodInfo (see PsProxy.generic)
+        self._generic_methods: Dict[Any, str] = {}
         self.pid: Optional[int] = None
     
     @property
@@ -317,6 +320,7 @@ class Shell:
         self._edition = None
         self._version = None
         self._proxy_origins.clear()
+        self._generic_methods.clear()
         try:
             self._core.stop(force)
         except Exception as e:  # Surface backend failures in a consistent type.

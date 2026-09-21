@@ -73,6 +73,78 @@ with Shell() as sh:
     client = sh.make_proxy("", "$client")
 ```
 
+## Static members on instances
+
+Like Python, the proxy lets you call a type's static members through an
+instance: `tia.GetProcesses()` runs `[Siemens.Engineering.TiaPortal]::GetProcesses()`,
+`dt.IsLeapYear(2024)` runs `[datetime]::IsLeapYear(2024)`, and static
+properties/fields (`dt.UtcNow`, `dt.MaxValue`) read the same way. Inherited
+statics are included; `System.Object`'s `Equals`/`ReferenceEquals` are not.
+Instance members win on name clashes. Generated stubs list these members
+tagged `# static`.
+
+## Generic methods
+
+Windows PowerShell 5.1 has no syntax for calling a generic method, and
+doing the reflection dance through the proxy costs a round trip per step.
+`generic()` does the whole thing in one:
+
+```python
+container = item.generic("GetService", SoftwareContainer)()   # GetService<SoftwareContainer>()
+value = portal.generic("Echo", "System.String")("hei")        # type names work too
+```
+
+Type arguments can be generated protocol classes, static type proxies or
+.NET type names. The closed `MethodInfo` is cached in the session per
+(runtime type, method, type arguments, argument count), so the second
+`DeviceItem` only pays for `Invoke()`. The lookup also searches the type's
+interfaces (explicit interface implementations). The result is converted
+like any method result; objects become sub-proxies (without `ps_origin`).
+
+## Bulk reads
+
+Iterating a proxy collection costs a couple of round trips per element and
+member (`Item(i)`, then each property). For read-only listings, read all
+rows in one round trip instead:
+
+```python
+rows = blocks.proxy_select("Name", type="GetType().FullName", size="Size")
+# [{"Name": "PIDWrapper", "type": "Siemens.Engineering.SW.Blocks.FB", "size": 1024}, ...]
+```
+
+Each expression is evaluated as `$element.<expression>`. Scalars come back
+as Python values (datetimes as ISO strings, enums as names), anything else
+as its string form; a non-collection yields one row. Use live proxies when
+you need to act on the objects, `proxy_select` (or `to_psobject()`) when
+you only need to read them.
+
+Property reads and method calls themselves cost one round trip each: the
+assignment and the runtime-type read travel in the same command.
+
+## Collections
+
+A .NET collection behind a proxy behaves like a read-only Python
+collection, driven by what the object actually exposes:
+
+| Python | Backed by |
+|--------|-----------|
+| `len(p)` | `Count` or `Length`, else `@($ref).Count` for any `IEnumerable` |
+| `p[i]`, `p[-1]`, `p[1:3]` | the `Item` indexer, else `@($ref)[i]`; `IndexError` out of range |
+| `p["key"]` | the keyed `Item` indexer (dictionaries) |
+| `for x in p` | `Item(i)` per index, else one snapshot of the enumeration; dictionaries iterate keys |
+| `x in p` | `ContainsKey` (dictionaries), `Contains`, else a linear scan |
+
+Elements come back converted like any other value (scalars inline, objects
+as sub-proxies with `ps_origin` such as `$list.Item(1)`). `bool(p)` is
+always `True`; `len()` and iteration raise `TypeError` for non-collections.
+
+Generated stubs annotate accordingly: `IEnumerable<T>`, `IList<T>`,
+`ReadOnlyCollection<T>` and arrays are `Sequence[T]`, dictionaries
+`Mapping[K, V]`, sets `AbstractSet[T]`, `byte[]` is `bytes` and `char[]`
+is `str`. They are deliberately not `List`/`Dict`: `append()` or item
+assignment are not available; call the .NET members (`Add`, `Remove`)
+for mutation.
+
 ## Static Classes
 
 A bare `[Type]` literal binds the *type itself* instead of creating an

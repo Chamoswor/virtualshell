@@ -63,17 +63,33 @@ TYPE_MAP: Dict[str, Tuple[str, Tuple[str, ...], Tuple[str, ...]]] = {
 METHOD_PATTERN = re.compile(r"(?P<ret>[^\s]+)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\((?P<params>.*)\)")
 ARRAY_PATTERN = re.compile(r"(?P<inner>.+)\[\]")
 NULLABLE_PATTERN = re.compile(r"System\.Nullable`1\[(?P<inner>.+)\]")
-GENERIC_PATTERN = re.compile(r"System\.Collections\.Generic\.(?P<outer>\w+)`\d+\[(?P<inner>.+)\]")
+GENERIC_PATTERN = re.compile(
+    r"System\.Collections\.(?:Generic|ObjectModel|Concurrent)\.(?P<outer>\w+)`\d+\[(?P<inner>.+)\]")
+# Collections come back as proxies implementing len()/[]/iter/in (read-only
+# Python protocols), so they are annotated Sequence/Mapping/AbstractSet rather
+# than List/Dict/Set, which would promise append() and item assignment.
 GENERIC_COLLECTIONS: Dict[str, str] = {
-    "List": "List",
-    "IList": "List",
-    "IEnumerable": "List",
-    "ICollection": "List",
-    "Collection": "List",
-    "Dictionary": "Dict",
-    "IDictionary": "Dict",
-    "HashSet": "Set",
-    "ISet": "Set",
+    "List": "Sequence",
+    "IList": "Sequence",
+    "IEnumerable": "Sequence",
+    "ICollection": "Sequence",
+    "Collection": "Sequence",
+    "IReadOnlyList": "Sequence",
+    "IReadOnlyCollection": "Sequence",
+    "ReadOnlyCollection": "Sequence",
+    "ObservableCollection": "Sequence",
+    "Queue": "Sequence",
+    "Stack": "Sequence",
+    "LinkedList": "Sequence",
+    "Dictionary": "Mapping",
+    "IDictionary": "Mapping",
+    "IReadOnlyDictionary": "Mapping",
+    "SortedDictionary": "Mapping",
+    "ConcurrentDictionary": "Mapping",
+    "HashSet": "AbstractSet",
+    "ISet": "AbstractSet",
+    "SortedSet": "AbstractSet",
+    "IReadOnlySet": "AbstractSet",
 }
 
 VARIABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -146,35 +162,36 @@ def map_ps_type(type_name: str) -> Tuple[str, Set[str], Set[str]]:
         args = split_generic_arguments(inner_raw)
         target = GENERIC_COLLECTIONS.get(outer)
 
-        if target == "Dict":
+        if target == "Mapping":
             key_ann, key_t, key_r = map_ps_type(args[0] if args else "")
             val_ann, val_t, val_r = map_ps_type(args[1] if len(args) > 1 else "")
             typing_bits.update(key_t)
             typing_bits.update(val_t)
             runtime_bits.update(key_r)
             runtime_bits.update(val_r)
-            typing_bits.add("Dict")
-            return f"Dict[{key_ann}, {val_ann}]", typing_bits, runtime_bits
+            typing_bits.add("Mapping")
+            return f"Mapping[{key_ann}, {val_ann}]", typing_bits, runtime_bits
 
         inner_ann, inner_t, inner_r = map_ps_type(args[0] if args else "")
         typing_bits.update(inner_t)
         runtime_bits.update(inner_r)
 
-        if target == "Set":
-            typing_bits.add("Set")
-            return f"Set[{inner_ann}]", typing_bits, runtime_bits
-        if target == "List":
-            typing_bits.add("List")
-            return f"List[{inner_ann}]", typing_bits, runtime_bits
+        if target in ("AbstractSet", "Sequence"):
+            typing_bits.add(target)
+            return f"{target}[{inner_ann}]", typing_bits, runtime_bits
 
         typing_bits.add("Any")
         return "Any", typing_bits, runtime_bits
 
     # char[] binds from a plain string in PowerShell (the binder converts),
     # and Python has no char type - so `str` is the accurate annotation.
-    # Mapping it to List[str] would wrongly suggest lists of words are valid.
+    # Mapping it to a sequence would wrongly suggest lists of words are valid.
     if name in {"char[]", "Char[]", "System.Char[]"}:
         return "str", typing_bits, runtime_bits
+
+    # byte[] travels through the zero-copy bridge as bytes in both directions.
+    if name in {"byte[]", "Byte[]", "System.Byte[]"}:
+        return "bytes", typing_bits, runtime_bits
 
     array_match = ARRAY_PATTERN.fullmatch(name)
     if array_match:
@@ -182,8 +199,8 @@ def map_ps_type(type_name: str) -> Tuple[str, Set[str], Set[str]]:
         ann, t_bits, r_bits = map_ps_type(inner)
         typing_bits.update(t_bits)
         runtime_bits.update(r_bits)
-        typing_bits.add("List")
-        return f"List[{ann}]", typing_bits, runtime_bits
+        typing_bits.add("Sequence")
+        return f"Sequence[{ann}]", typing_bits, runtime_bits
 
     base = TYPE_MAP.get(name)
     if not base:
@@ -436,10 +453,11 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
         typing_bits.update(t_bits)
         runtime_bits.update(r_bits)
         prop_lines.append("    @property")
-        prop_lines.append(f"    def {safe_name}(self) -> {annotation}: ...")
+        prop_lines.append(_static_tag(f"    def {safe_name}(self) -> {annotation}: ...", entry))
         if property_is_writable(entry):
             prop_lines.append(f"    @{safe_name}.setter")
-            prop_lines.append(f"    def {safe_name}(self, value: {annotation}) -> None: ...")
+            prop_lines.append(_static_tag(
+                f"    def {safe_name}(self, value: {annotation}) -> None: ...", entry))
         prop_lines.append("")
 
     method_lines: List[str] = []
@@ -450,6 +468,8 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
             continue
         seen_method_names.add(safe_name)
         stub_lines = build_method_signatures(safe_name, entry, typing_bits, runtime_bits)
+        stub_lines = [_static_tag(line, entry) if line.lstrip().startswith("def ") else line
+                      for line in stub_lines]
         method_lines.extend(stub_lines)
         if len(stub_lines) > 1:
             method_lines.append("")  # visual separation after overload groups
@@ -457,6 +477,8 @@ def render_protocol(class_name: str, members: Iterable[MutableMapping[str, Any]]
     if method_lines and method_lines[-1] == "":
         method_lines.pop()
     method_lines.append("    def proxy_multi_call(self, func: Callable[..., Any], *args: Any) -> List[Any]: ...")
+    method_lines.append("    def proxy_select(self, *expressions: str, **aliases: str) -> List[Dict[str, Any]]: ...")
+    method_lines.append("    def generic(self, name: str, *type_args: Any) -> Callable[..., Any]: ...")
     method_lines.append("    def proxy_schema(self) -> Dict[str, Any]: ...")
     method_lines.append("")
     method_lines.append("    @property")
@@ -554,7 +576,32 @@ def fetch_members(shell, command: str) -> Tuple[str, List[MutableMapping[str, An
         "Get-Member -InputObject $obj | ConvertTo-Json -Depth 6 -Compress",
         raise_on_error=True,
     )
-    return type_name, _decode_members((raw_result.out or "").strip())
+    members = _decode_members((raw_result.out or "").strip())
+
+    # Static members of the type are reachable on instance proxies too
+    # (routed to [Type]::Member), so list them, tagged. Instance names win;
+    # System.Object's static Equals/ReferenceEquals are noise.
+    static_result = shell.run(
+        "Get-Member -InputObject $obj -Static | ConvertTo-Json -Depth 6 -Compress",
+        raise_on_error=False,
+    )
+    if static_result.success and (static_result.out or "").strip():
+        try:
+            static_members = _decode_members(static_result.out.strip())
+        except RuntimeError:
+            static_members = []
+        instance_names = {str(m.get("Name")) for m in members}
+        for entry in static_members:
+            name = str(entry.get("Name") or "")
+            if not name or name in instance_names or name in ("Equals", "ReferenceEquals"):
+                continue
+            entry["Static"] = True
+            members.append(entry)
+    return type_name, members
+
+
+def _static_tag(line: str, entry: MutableMapping[str, Any]) -> str:
+    return line + "  # static" if entry.get("Static") else line
 
 
 def fetch_static_members(shell, type_text: str) -> Tuple[str, List[MutableMapping[str, Any]]]:

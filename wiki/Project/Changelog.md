@@ -25,6 +25,21 @@
   typed with the generated classes, so completion works down the object graph
   (`tia.Projects.Item(0)` -> `Project`). `include_namespaces=` / `max_types=`
   bound the walk
+- `PsProxy.generic(name, *type_args)(*args)` calls generic methods
+  (`item.generic("GetService", SoftwareContainer)()`) in one round trip, with
+  the closed MethodInfo cached per runtime type in the session
+- `PsProxy.proxy_select(*expressions, **aliases)` reads members of every
+  element of a collection in one round trip, for read-only listings
+- Property reads and method calls now take one round trip instead of two
+  (assignment and runtime-type read share a command)
+- Static .NET members are reachable on instance proxies (`tia.GetProcesses()`,
+  `dt.IsLeapYear(2024)`, `dt.UtcNow`), routed to `[Type]::Member`; both
+  generators emit them, tagged `# static`
+- Proxies of .NET collections implement the Python collection protocol:
+  `len()`, indexing (negative indices, slices, keys), iteration and `in`,
+  backed by Count/Length, the Item indexer, GetEnumerator and Keys/ContainsKey.
+  Stubs annotate collections as `Sequence[T]` / `Mapping[K, V]` /
+  `AbstractSet[T]` (not `List`/`Dict`/`Set`), `byte[]` as `bytes`
 - Proxies record provenance (`PsProxy.ps_origin`: "$tia", "[T]::new(3)",
   "$tia.Projects", "$sb.Append('x')"); `generate_psobject` accepts a proxy (or
   its `ps_ref`) and embeds that path, so stubs for derived objects reach the

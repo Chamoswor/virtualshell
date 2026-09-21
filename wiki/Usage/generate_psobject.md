@@ -127,9 +127,12 @@ Rules of the walk:
 - Only types outside the .NET runtime are followed (the SDK). Runtime types
   map to Python scalars (`str`, `int`, `datetime.datetime`, ...) or `Any`;
   enums map to `str`, which is what proxies return for them.
-- Generic collections map like the single-file generator: `IEnumerable<T>`
-  / `List<T>` become `List[T]`, dictionaries `Dict[K, V]`, `Nullable<T>`
-  `Optional[T]`, with `T` resolved to the generated class when followed.
+- Collections map to the read-only Python protocols the proxy actually
+  implements (see [make_proxy: Collections](make_proxy.md#collections)):
+  `IEnumerable<T>` / `IList<T>` / `ReadOnlyCollection<T>` / `T[]` become
+  `Sequence[T]`, dictionaries `Mapping[K, V]`, sets `AbstractSet[T]`,
+  `Nullable<T>` `Optional[T]`, `byte[]` `bytes`, with `T` resolved to the
+  generated class when followed.
 - Indexers (`this[int]`) become methods (`Item(index)`), overloads become
   `@overload` groups; cross-module references are `TYPE_CHECKING` imports,
   so importing the package never creates cycles at runtime.

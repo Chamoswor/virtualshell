@@ -164,8 +164,57 @@ function Get-VsTypeGraph {
             }
         }
 
+        # Static members (declared on the type or inherited, but not
+        # System.Object's Equals/ReferenceEquals). Instance members win on
+        # name clashes. Proxies route these to [Type]::Member at runtime.
+        $sflags = [System.Reflection.BindingFlags]'Public,Static,FlattenHierarchy'
+        foreach ($p in $t.GetProperties($sflags)) {
+            $key = $p.Name + '|' + @($p.GetIndexParameters()).Count
+            if ($propNames.ContainsKey($key)) { continue }
+            $propNames[$key] = $true
+            [void]$props.Add([pscustomobject]@{
+                n  = $p.Name
+                t  = (Format-TypeName $p.PropertyType)
+                w  = [bool]$p.CanWrite
+                ip = @()
+                s  = $true
+            })
+            Add-Follow $p.PropertyType
+        }
+        foreach ($f in $t.GetFields($sflags)) {
+            $key = $f.Name + '|0'
+            if ($propNames.ContainsKey($key)) { continue }
+            $propNames[$key] = $true
+            [void]$props.Add([pscustomobject]@{
+                n  = $f.Name
+                t  = (Format-TypeName $f.FieldType)
+                w  = (-not ($f.IsInitOnly -or $f.IsLiteral))
+                ip = @()
+                s  = $true
+            })
+            Add-Follow $f.FieldType
+        }
+        $staticMeths = @{}
+        foreach ($m in $t.GetMethods($sflags)) {
+            if ($m.IsSpecialName -or $m.DeclaringType -eq [object]) { continue }
+            if ($meths.ContainsKey($m.Name)) { continue }
+            $overload = [pscustomobject]@{
+                r = (Format-TypeName $m.ReturnType)
+                p = @($m.GetParameters() | ForEach-Object {
+                    [pscustomobject]@{ n = $_.Name; t = (Format-TypeName $_.ParameterType) }
+                })
+            }
+            if (-not $staticMeths.ContainsKey($m.Name)) { $staticMeths[$m.Name] = New-Object System.Collections.ArrayList }
+            [void]$staticMeths[$m.Name].Add($overload)
+            Add-Follow $m.ReturnType
+            foreach ($mp in $m.GetParameters()) { Add-Follow $mp.ParameterType }
+        }
+
         $methodList = @($meths.Keys | Sort-Object | ForEach-Object {
             [pscustomobject]@{ n = $_; o = @($meths[$_]) }
+        })
+        $methodList += @($staticMeths.Keys | Sort-Object | ForEach-Object {
+            [pscustomobject]@{ n = $_; o = @($staticMeths[$_]); s = $true }
         })
 
         [pscustomobject]@{

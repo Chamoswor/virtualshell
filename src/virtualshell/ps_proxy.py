@@ -268,6 +268,7 @@ class MethodMeta:
     name: str
     overloads: List[MethodOverload] = field(default_factory=list)
     is_script_method: bool = False
+    is_static: bool = False   # static .NET member, reached through an instance proxy
 
     def overload_for(self, arg_count: int) -> Optional[MethodOverload]:
         for ov in self.overloads:
@@ -281,6 +282,7 @@ class PropertyMeta:
     name: str
     type_name: str
     writable: bool = False
+    is_static: bool = False
 
 
 @dataclass
@@ -326,11 +328,55 @@ foreach ($__vs_g in $__vs_groups) {{
 $__vs_sm = @($__vs_o.PSObject.Members |
     Where-Object {{ $_.MemberType -in @('ScriptMethod', 'ParameterizedProperty') }} |
     ForEach-Object {{ [pscustomobject]@{{ n = $_.Name }} }})
+# Static members of the runtime type (inherited too, but not System.Object's
+# Equals/ReferenceEquals): reachable on the instance proxy, Python style.
+$__vs_sflags = [System.Reflection.BindingFlags]'Public,Static,FlattenHierarchy'
+$__vs_sprops = @()
+$__vs_smeths = @()
+try {{
+    $__vs_t = $__vs_o.GetType()
+    foreach ($__vs_pi in $__vs_t.GetProperties($__vs_sflags)) {{
+        $__vs_sprops += [pscustomobject]@{{
+            n = $__vs_pi.Name
+            t = [string]$__vs_pi.PropertyType.FullName
+            w = ($null -ne $__vs_pi.SetMethod)
+        }}
+    }}
+    foreach ($__vs_fi in $__vs_t.GetFields($__vs_sflags)) {{
+        $__vs_sprops += [pscustomobject]@{{
+            n = $__vs_fi.Name
+            t = [string]$__vs_fi.FieldType.FullName
+            w = (-not ($__vs_fi.IsInitOnly -or $__vs_fi.IsLiteral))
+        }}
+    }}
+    $__vs_sgroups = $__vs_t.GetMethods($__vs_sflags) |
+        Where-Object {{ -not $_.IsSpecialName -and $_.DeclaringType -ne [object] }} |
+        Group-Object Name
+    foreach ($__vs_g in $__vs_sgroups) {{
+        $__vs_ovl = @(foreach ($__vs_mi in $__vs_g.Group) {{
+            [pscustomobject]@{{
+                r = $__vs_mi.ReturnType.FullName
+                p = @(foreach ($__vs_pp in $__vs_mi.GetParameters()) {{
+                    [pscustomobject]@{{
+                        n = $__vs_pp.Name
+                        t = $__vs_pp.ParameterType.FullName
+                        o = $__vs_pp.IsOut
+                        rf = $__vs_pp.ParameterType.IsByRef
+                        a = $__vs_pp.ParameterType.IsArray
+                    }}
+                }})
+            }}
+        }})
+        $__vs_smeths += ,([pscustomobject]@{{ n = $__vs_g.Name; o = $__vs_ovl }})
+    }}
+}} catch {{ }}
 [pscustomobject]@{{
     tn = $__vs_o.PSObject.TypeNames[0]
     props = $__vs_props
     meths = $__vs_meths
     sm = $__vs_sm
+    sprops = $__vs_sprops
+    smeths = $__vs_smeths
 }} | ConvertTo-Json -Depth 8 -Compress
 """.strip()
 
@@ -407,11 +453,8 @@ def _parse_schema(payload: Dict[str, Any]) -> Schema:
             writable=bool(prop.get("w")),
         )
 
-    for meth in as_list(payload.get("meths")):
-        if not isinstance(meth, dict) or not meth.get("n"):
-            continue
-        name = str(meth["n"])
-        meta = MethodMeta(name=name)
+    def parse_method(meth: Dict[str, Any], *, is_static: bool) -> MethodMeta:
+        meta = MethodMeta(name=str(meth["n"]), is_static=is_static)
         for ov in as_list(meth.get("o")):
             if not isinstance(ov, dict):
                 continue
@@ -427,13 +470,39 @@ def _parse_schema(payload: Dict[str, Any]) -> Schema:
                     is_array=bool(param.get("a")),
                 ))
             meta.overloads.append(overload)
-        schema.methods[name] = meta
+        return meta
+
+    for meth in as_list(payload.get("meths")):
+        if not isinstance(meth, dict) or not meth.get("n"):
+            continue
+        schema.methods[str(meth["n"])] = parse_method(meth, is_static=False)
 
     for sm in as_list(payload.get("sm")):
         if isinstance(sm, dict) and sm.get("n"):
             name = str(sm["n"])
             schema.methods.setdefault(
                 name, MethodMeta(name=name, is_script_method=True))
+
+    # Static members: instance members win on name clashes.
+    for prop in as_list(payload.get("sprops")):
+        if not isinstance(prop, dict) or not prop.get("n"):
+            continue
+        name = str(prop["n"])
+        if name in schema.properties or name in schema.methods:
+            continue
+        schema.properties[name] = PropertyMeta(
+            name=name,
+            type_name=str(prop.get("t") or ""),
+            writable=bool(prop.get("w")),
+            is_static=True,
+        )
+    for meth in as_list(payload.get("smeths")):
+        if not isinstance(meth, dict) or not meth.get("n"):
+            continue
+        name = str(meth["n"])
+        if name in schema.methods or name in schema.properties:
+            continue
+        schema.methods[name] = parse_method(meth, is_static=True)
 
     return schema
 
@@ -486,6 +555,45 @@ if ($null -eq $__vs_v) {{
 }} else {{
     @{{ k = 'o'; t = [string]$__vs_v.PSObject.TypeNames[0] }} | ConvertTo-Json -Compress
 }}
+""".strip()
+
+# Find a generic method definition on {type_expr} (or its interfaces), close
+# it over the named type arguments and keep the MethodInfo in {var}.
+_GENERIC_LOOKUP = """
+$__vs_gt = {type_expr}
+$__vs_gf = [System.Reflection.BindingFlags]'Public,Instance,Static,FlattenHierarchy'
+$__vs_gm = @($__vs_gt.GetMethods($__vs_gf) | Where-Object {{ $_.Name -eq {name} -and $_.IsGenericMethodDefinition -and $_.GetGenericArguments().Count -eq {ntypes} -and $_.GetParameters().Count -eq {nargs} }})
+if ($__vs_gm.Count -eq 0) {{
+    foreach ($__vs_gi in $__vs_gt.GetInterfaces()) {{
+        $__vs_gm += @($__vs_gi.GetMethods() | Where-Object {{ $_.Name -eq {name} -and $_.IsGenericMethodDefinition -and $_.GetGenericArguments().Count -eq {ntypes} -and $_.GetParameters().Count -eq {nargs} }})
+    }}
+}}
+if ($__vs_gm.Count -eq 0) {{ throw ("No generic method " + {name} + " with {ntypes} type parameter(s) and {nargs} argument(s) on " + $__vs_gt.FullName) }}
+$__vs_ta = @()
+foreach ($__vs_tn in @({types})) {{
+    $__vs_tt = $__vs_tn -as [type]
+    if (-not $__vs_tt) {{ throw ("Type argument not found in this session: " + $__vs_tn) }}
+    $__vs_ta += $__vs_tt
+}}
+${var} = $__vs_gm[0].MakeGenericMethod([type[]]$__vs_ta)
+""".strip()
+
+# Bulk read: one row per element of {source}, one JSON document.
+_SELECT_SCRIPT = """
+$__vs_cell = {{
+    param($v)
+    if ($null -eq $v) {{ return $null }}
+    if ($v -is [string] -or $v -is [bool] -or $v -is [sbyte] -or $v -is [byte] -or $v -is [int16] -or $v -is [uint16] -or $v -is [int] -or $v -is [uint32] -or $v -is [long] -or $v -is [uint64] -or $v -is [single] -or $v -is [double] -or $v -is [decimal]) {{ return $v }}
+    if ($v -is [datetime]) {{ return $v.ToString('o') }}
+    if ($v -is [enum] -or $v -is [char] -or $v -is [guid] -or $v -is [version] -or $v -is [uri] -or $v -is [timespan]) {{ return $v.ToString() }}
+    return [string]$v
+}}
+$__vs_rows = @(foreach ($__vs_e in {source}) {{
+    $__vs_row = [ordered]@{{}}
+{cells}
+    [pscustomobject]$__vs_row
+}})
+ConvertTo-Json -InputObject $__vs_rows -Depth 2 -Compress
 """.strip()
 
 _ISO_FRACTION_RE = re.compile(r"(\.\d{6})\d+")
@@ -704,27 +812,39 @@ class PsProxy:
         if register is not None and self._origin:
             register(self._ref, self._origin)
 
-    def _origin_base(self) -> Optional[str]:
+    def _static_base(self) -> str:
+        """Expression that `::` binds against: the type for static proxies,
+        the instance's runtime type otherwise."""
+        return self._ref if self._static else f"({self._ref}.GetType())"
+
+    def _origin_base(self, *, static: bool = False) -> Optional[str]:
         origin = self._origin
         if origin is None:
             return None
-        if self._static or _PLAIN_VAR_RE.fullmatch(origin):
+        if self._static:
+            return origin
+        if static:
+            return f"({origin}.GetType())"
+        if _PLAIN_VAR_RE.fullmatch(origin):
             return origin
         return f"({origin})"
 
-    def _member_origin(self, name: str) -> Optional[str]:
-        base = self._origin_base()
+    def _member_origin(self, name: str, *, static: bool = False) -> Optional[str]:
+        base = self._origin_base(static=static)
         if base is None or not _IDENT_RE.match(name):
             return None
-        return f"{base}::{name}" if self._static else f"{base}.{name}"
+        return f"{base}::{name}" if (self._static or static) else f"{base}.{name}"
 
     def _call_origin(self, name: str, origin_args: List[Optional[str]],
-                     *, awaited: bool) -> Optional[str]:
-        base = self._origin_base()
+                     *, awaited: bool, static: bool = False) -> Optional[str]:
+        base = self._origin_base(static=static)
         if base is None or not _IDENT_RE.match(name) or any(a is None for a in origin_args):
             return None
         arg_text = ", ".join(a for a in origin_args if a is not None)
-        call = f"{base}::{name}({arg_text})" if self._static else f"{base}.{name}({arg_text})"
+        if self._static or static:
+            call = f"{base}::{name}({arg_text})"
+        else:
+            call = f"{base}.{name}({arg_text})"
         return f"({call}).GetAwaiter().GetResult()" if awaited else call
 
     def _origin_arg(self, value: Any, formatted: str) -> Optional[str]:
@@ -750,16 +870,27 @@ class PsProxy:
     # -- value transport -------------------------------------------------------
 
     def _fetch_value(self, expr: str, *, label: str,
-                     origin: Optional[str] = None) -> Any:
-        """Assign `expr` to a temp var, then convert by runtime type.
+                     origin: Optional[str] = None,
+                     prelude: Optional[List[str]] = None) -> Any:
+        """Evaluate `expr` and convert the value by its runtime type.
 
-        `origin` is the reproducible expression recorded on a resulting
-        sub-proxy (None when the value cannot be reached from source text).
+        Assignment and the runtime-type read travel in ONE round trip: the
+        assignment runs inside try/catch, and the reader only runs when it
+        succeeded, so failures still surface as ExecutionError with the
+        host's own error text. `prelude` lines run before the assignment in
+        the same command (used by generic()). `origin` is the reproducible
+        expression recorded on a resulting sub-proxy.
         """
         ret = _next_var("ret")
-        self._run(f"${ret} = ({expr})", label=label)
-
-        out = self._run(_DISCRIMINATOR.format(ret=ret), label=f"{label} (read)")
+        assign = "\n".join(list(prelude or []) + [f"${ret} = ({expr})"])
+        script = (
+            "$__vs_ok = $false\n$__vs_err = $null\n"
+            "try {\n" + assign + "\n$__vs_ok = $?\n} catch { $__vs_err = $_ }\n"
+            "if ($__vs_ok) {\n" + _DISCRIMINATOR.format(ret=ret) + "\n}"
+            " elseif ($null -ne $__vs_err) { Write-Error -ErrorRecord $__vs_err }"
+            " else { Write-Error 'expression reported an error' }"
+        )
+        out = self._run(script, label=label)
         try:
             info = json.loads(out)
         except json.JSONDecodeError as exc:
@@ -865,11 +996,14 @@ class PsProxy:
             method_cache[name] = bound
             return bound
         if name in schema.properties:
-            expr = (_static_member_expr(self._ref, name) if self._static
-                    else _member_expr(self._ref, name))
+            meta = schema.properties[name]
+            if self._static or meta.is_static:
+                expr = _static_member_expr(self._static_base(), name)
+            else:
+                expr = _member_expr(self._ref, name)
             return self._fetch_value(
                 expr, label=f"Read property {schema.type_name}.{name}",
-                origin=self._member_origin(name))
+                origin=self._member_origin(name, static=meta.is_static))
         if name in dynamic:
             return dynamic[name]
         raise AttributeError(
@@ -887,10 +1021,11 @@ class PsProxy:
             meta = schema.properties[name]
             if not meta.writable:
                 raise AttributeError(f"Property {name!r} is read-only")
-            if self._static and not _IDENT_RE.match(name):
+            static = self._static or meta.is_static
+            if static and not _IDENT_RE.match(name):
                 raise AttributeError(
                     f"Cannot write static member {name!r}: not an identifier")
-            target = (_static_member_expr(self._ref, name) if self._static
+            target = (_static_member_expr(self._static_base(), name) if static
                       else _member_expr(self._ref, name))
             cleanup: List[str] = []
             try:
@@ -904,10 +1039,101 @@ class PsProxy:
 
         self._dynamic[name] = value
 
+    # -- Python collection protocol --------------------------------------------
+    # .NET collections behind a proxy behave like Python sequences / mappings:
+    # len(), indexing (negative indices and slices included), iteration and
+    # `in`. Driven by what the object actually exposes: Count/Length, an Item
+    # indexer, GetEnumerator, and Keys/ContainsKey for dictionaries. Stubs
+    # annotate such members as Sequence[T] / Mapping[K, V] accordingly.
+
+    def _is_mapping_like(self) -> bool:
+        s = self._schema
+        return "Keys" in s.properties and "ContainsKey" in s.methods
+
+    def _is_collection(self) -> bool:
+        # Every IEnumerable (lists, arrays, dictionaries, sets, ...) has
+        # GetEnumerator; a Count + Item indexer pair is collection-shaped too.
+        # A StringBuilder (Length, Chars) is neither.
+        s = self._schema
+        return "GetEnumerator" in s.methods or ("Count" in s.properties and "Item" in s.methods)
+
+    def _not_a_collection(self) -> TypeError:
+        return TypeError(f"{self._schema.type_name} proxy is not a collection "
+                         "(no IEnumerable, and no Count + Item indexer)")
+
+    def __bool__(self) -> bool:
+        return True  # a proxy always refers to an object; never len()-based
+
+    def __len__(self) -> int:
+        s = self._schema
+        if not self._is_collection():
+            raise self._not_a_collection()
+        for prop in ("Count", "Length"):
+            if prop in s.properties:
+                return int(self._fetch_value(_member_expr(self._ref, prop),
+                                             label=f"len({s.type_name})"))
+        return int(self._run(f"@({self._ref}).Count", label=f"len({s.type_name})"))
+
+    def __getitem__(self, index: Any) -> Any:
+        s = self._schema
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
+        if not isinstance(index, int):
+            if "Item" in s.methods:
+                return self.Item(index)              # keyed indexer (dictionaries, ...)
+            raise TypeError(f"{s.type_name} proxy has no keyed indexer")
+        if not self._is_collection():
+            raise self._not_a_collection()
+        n = len(self)
+        if index < 0:
+            index += n
+        if not 0 <= index < n:
+            raise IndexError(f"{s.type_name} index out of range")
+        if "Item" in s.methods:
+            return self.Item(index)
+        base = self._origin_base()
+        return self._fetch_value(f"@({self._ref})[{index}]",
+                                 label=f"{s.type_name}[{index}]",
+                                 origin=f"@({base})[{index}]" if base else None)
+
+    def __iter__(self):
+        # Check eagerly (a generator body would only run on the first next()).
+        if not self._is_collection():
+            raise self._not_a_collection()
+        return self._iterate()
+
+    def _iterate(self):
+        s = self._schema
+        if self._is_mapping_like():
+            source = f"@({self._ref}.Keys)"
+        elif "Item" in s.methods and "Count" in s.properties:
+            for i in range(len(self)):
+                yield self.Item(i)
+            return
+        else:
+            source = f"@({self._ref})"
+        # Snapshot the enumeration once, then fetch element by element.
+        arr = _next_var("iter")
+        self._run(f"${arr} = {source}", label=f"iter({s.type_name})")
+        try:
+            count = int(self._run(f"${arr}.Count", label=f"iter({s.type_name})"))
+            for i in range(count):
+                yield self._fetch_value(f"${arr}[{i}]", label=f"iter({s.type_name})[{i}]")
+        finally:
+            self._cleanup_vars([arr])
+
+    def __contains__(self, item: Any) -> bool:
+        s = self._schema
+        if self._is_mapping_like():
+            return bool(self.ContainsKey(item))
+        if "Contains" in s.methods:
+            return bool(self.Contains(item))
+        return any(element == item for element in self)
+
     def __dir__(self) -> List[str]:
         schema: Schema = object.__getattribute__(self, "_schema")
-        names = {"type_name", "proxy_schema", "proxy_multi_call",
-                 "to_psobject", "ps_ref", "release"}
+        names = {"type_name", "proxy_schema", "proxy_multi_call", "proxy_select",
+                 "generic", "to_psobject", "ps_ref", "ps_origin", "release"}
         names.update(schema.methods)
         names.update(schema.properties)
         names.update(self._dynamic)
@@ -966,15 +1192,16 @@ class PsProxy:
                                                          cleanup=cleanup))
                     origin_args.append(self._origin_arg(value, ps_args[-1]))
 
-            if self._static:
-                call = _static_method_call_expr(self._ref, meta.name, ps_args)
+            if self._static or meta.is_static:
+                call = _static_method_call_expr(self._static_base(), meta.name, ps_args)
             else:
                 call = _method_call_expr(self._ref, meta.name, ps_args)
             return_type = overload.return_type if overload else ""
             awaited = bool(_AWAITABLE_RE.search(return_type))
             if awaited:
                 call = f"({call}).GetAwaiter().GetResult()"
-            origin = (self._call_origin(meta.name, origin_args, awaited=awaited)
+            origin = (self._call_origin(meta.name, origin_args, awaited=awaited,
+                                        static=meta.is_static)
                       if not out_buffers else None)
 
             label = f"Call {self._schema.type_name}.{meta.name}"
@@ -1059,9 +1286,9 @@ class PsProxy:
                 for one_call in call_args[start:start + batch_size]:
                     ps_args = [self._format_argument(a, cleanup=cleanup)
                                for a in one_call]
-                    if self._static:
+                    if self._static or self._schema.methods[method_name].is_static:
                         call = _static_method_call_expr(
-                            self._ref, method_name, ps_args)
+                            self._static_base(), method_name, ps_args)
                     else:
                         call = _method_call_expr(self._ref, method_name, ps_args)
                     lines.append(f"$__vs_mc.Add(({call}))")
@@ -1079,6 +1306,116 @@ class PsProxy:
                 else:
                     results.append(decoded)
         return results
+
+    # -- generic methods (one round trip, MethodInfo cached per runtime type) --
+
+    @staticmethod
+    def _type_argument_name(value: Any) -> str:
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith("[") and text.endswith("]"):
+                text = text[1:-1].strip()
+            if not text:
+                raise ValueError("empty type argument")
+            return text
+        if isinstance(value, PsProxy):
+            if not value._static:
+                raise TypeError("type arguments must be types, not instances; "
+                                "pass a static proxy, a generated class or a type name")
+            return value._schema.type_name
+        type_name = getattr(value, "__ps_type_name__", None)
+        if type_name:
+            return str(type_name)
+        raise TypeError(f"Cannot use {value!r} as a .NET type argument")
+
+    def generic(self, name: str, *type_args: Any) -> Callable[..., Any]:
+        """Bind the generic method `name` closed over `type_args`.
+
+        ``item.generic("GetService", SoftwareContainer)()`` runs
+        ``GetService<SoftwareContainer>()`` on the object in ONE round trip:
+        the method is found by reflection, closed with MakeGenericMethod and
+        invoked inside a single PowerShell command (Windows PowerShell 5.1
+        has no generic-call syntax). Type arguments may be generated
+        protocol classes, static type proxies or .NET type names. The closed
+        MethodInfo is cached in the session per (runtime type, name, type
+        arguments, argument count), so later calls only Invoke().
+        """
+        if not _IDENT_RE.match(name or ""):
+            raise ValueError(f"Invalid method name {name!r}")
+        if not type_args:
+            raise TypeError("generic() needs at least one type argument")
+        type_names = [self._type_argument_name(t) for t in type_args]
+        proxy = self
+
+        def invoke(*args: Any) -> Any:
+            return proxy._invoke_generic(name, type_names, list(args))
+
+        invoke.__name__ = name
+        invoke.__qualname__ = f"{self._schema.type_name}.{name}<{','.join(type_names)}>"
+        return invoke
+
+    def _invoke_generic(self, name: str, type_names: List[str], args: List[Any]) -> Any:
+        cleanup: List[str] = []
+        try:
+            ps_args = [self._format_argument(a, cleanup=cleanup) for a in args]
+            key = (self._schema.type_name, name, tuple(type_names), len(args))
+            cache = getattr(self._shell, "_generic_methods", None)
+            var = cache.get(key) if cache is not None else None
+            prelude: List[str] = []
+            if var is None:
+                var = _next_var("gm")
+                type_list = ", ".join(_ps_quote(t) for t in type_names)
+                prelude = _GENERIC_LOOKUP.format(
+                    var=var, type_expr=self._static_base(), name=_ps_quote(name),
+                    types=type_list, ntypes=len(type_names), nargs=len(args)).splitlines()
+            target = "$null" if self._static else self._ref
+            arg_array = "[object[]]@(" + ", ".join(ps_args) + ")"
+            call = (f"if (${var}.IsStatic) {{ ${var}.Invoke($null, {arg_array}) }} "
+                    f"else {{ ${var}.Invoke({target}, {arg_array}) }}")
+            label = f"Call {self._schema.type_name}.{name}<{','.join(type_names)}>"
+            result = self._fetch_value(call, label=label, prelude=prelude)
+            if cache is not None:
+                cache[key] = var
+            return result
+        finally:
+            self._cleanup_vars(cleanup)
+
+    # -- bulk reads --------------------------------------------------------------
+
+    def proxy_select(self, *expressions: str, **aliases: str) -> List[Dict[str, Any]]:
+        """Read several members of every element in ONE round trip.
+
+        ``blocks.proxy_select("Name", "GetType().FullName")`` returns
+        ``[{"Name": ..., "GetType().FullName": ...}, ...]``; keyword form
+        names the columns: ``proxy_select(name="Name", type="GetType().FullName")``.
+        Each expression is evaluated as ``$element.<expression>``. Scalars
+        come back as Python values (datetimes as ISO strings, enums as their
+        names); anything else as its string form. On a non-collection the
+        result has one row. Use this for read-only listings; use live proxies
+        when you need to act on the objects.
+        """
+        columns: List[Tuple[str, str]] = [(e, e) for e in expressions]
+        columns += [(k, v) for k, v in aliases.items()]
+        if not columns:
+            raise ValueError("proxy_select() needs at least one expression")
+        for key, expr in columns:
+            if not expr or "\n" in expr or "\r" in expr:
+                raise ValueError(f"Invalid expression for column {key!r}")
+        cells = "\n".join(
+            f"        $__vs_row[{_ps_quote(key)}] = (& $__vs_cell ($__vs_e.{expr}))"
+            for key, expr in columns)
+        source = f"@({self._ref}.Values)" if self._is_mapping_like() else f"@({self._ref})"
+        script = _SELECT_SCRIPT.format(source=source, cells=cells)
+        out = self._run(script, label=f"proxy_select on {self._schema.type_name}")
+        if not out:
+            return []
+        try:
+            rows = json.loads(out)
+        except json.JSONDecodeError as exc:
+            raise ExecutionError("proxy_select: unexpected output") from exc
+        if isinstance(rows, dict):
+            rows = [rows]
+        return [dict(r) for r in rows if isinstance(r, dict)]
 
     def to_psobject(self, *, depth: int = 2, timeout: float = 30.0) -> PSObject:
         """Snapshot the live object as a PSObject via the zero-copy bridge."""

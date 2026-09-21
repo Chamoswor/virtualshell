@@ -461,3 +461,114 @@ class TestProvenance:
     def test_stale_temporary_gives_actionable_error(self, shell):
         with pytest.raises(ValueError, match="another session"):
             shell.make_proxy("", "$__vs_ret_999999")
+
+
+class TestStaticMembersViaInstance:
+    """Static .NET members are reachable on instance proxies, as in Python."""
+
+    def test_static_methods_and_members_on_datetime(self, shell):
+        shell.run("$vs_stat_dt = [datetime]::new(2024, 2, 10)", raise_on_error=True)
+        p = shell.make_proxy("", "$vs_stat_dt")
+        names = {m["Name"] for m in p.proxy_schema()["Methods"]}
+        assert "IsLeapYear" in names and "AddDays" in names      # static and instance
+        assert "ReferenceEquals" not in names                     # Object's statics skipped
+        assert p.IsLeapYear(2024) is True
+        assert p.DaysInMonth(2024, 2) == 29
+        assert isinstance(p.UtcNow, datetime)                     # static property
+        assert p.MaxValue.year == 9999                            # static readonly field
+        assert p.Year == 2024                                     # instance still first
+
+    def test_static_object_result_carries_origin(self, shell):
+        shell.run("$vs_stat_enc = [System.Text.Encoding]::UTF8", raise_on_error=True)
+        enc = shell.make_proxy("", "$vs_stat_enc")
+        ascii_enc = enc.GetEncoding("ascii")                     # static, inherited
+        assert ascii_enc.WebName == "us-ascii"
+        assert ascii_enc.ps_origin == "($vs_stat_enc.GetType())::GetEncoding('ascii')"
+
+
+class TestCollectionProtocol:
+    """.NET collections behind a proxy behave like Python sequences/mappings."""
+
+    def test_generic_list_is_a_sequence(self, shell):
+        shell.run("$vs_col_list = [System.Collections.Generic.List[string]]::new(); "
+                  "$vs_col_list.Add('a'); $vs_col_list.Add('b'); $vs_col_list.Add('c')",
+                  raise_on_error=True)
+        p = shell.make_proxy("", "$vs_col_list")
+        assert len(p) == 3
+        assert p[0] == "a" and p[-1] == "c"
+        assert p[1:] == ["b", "c"]
+        assert list(p) == ["a", "b", "c"]
+        assert "b" in p and "z" not in p
+        with pytest.raises(IndexError):
+            _ = p[3]
+        assert bool(p) is True
+
+    def test_readonly_collection_and_array(self, shell):
+        shell.run("$vs_col_ro = [System.Collections.ObjectModel.ReadOnlyCollection[int]]::new("
+                  "[int[]](1, 2, 3))", raise_on_error=True)
+        ro = shell.make_proxy("", "$vs_col_ro")
+        assert len(ro) == 3 and ro[1] == 2 and list(ro) == [1, 2, 3] and 2 in ro
+
+        shell.run("$vs_col_arr = [string[]]('x', 'y')", raise_on_error=True)
+        arr = shell.make_proxy("", "$vs_col_arr")     # Length, no Item indexer
+        assert len(arr) == 2 and arr[1] == "y" and list(arr) == ["x", "y"]
+
+    def test_dictionary_is_a_mapping(self, shell):
+        shell.run("$vs_col_dict = [System.Collections.Generic.Dictionary[string,int]]::new(); "
+                  "$vs_col_dict.Add('one', 1); $vs_col_dict.Add('two', 2)", raise_on_error=True)
+        d = shell.make_proxy("", "$vs_col_dict")
+        assert len(d) == 2
+        assert d["two"] == 2
+        assert sorted(d) == ["one", "two"]             # iterates keys
+        assert "one" in d and "three" not in d
+
+    def test_elements_that_are_objects_become_proxies_with_origin(self, shell):
+        shell.run("$vs_col_objs = [System.Collections.Generic.List[System.Text.StringBuilder]]::new(); "
+                  "$vs_col_objs.Add([System.Text.StringBuilder]::new('p')); "
+                  "$vs_col_objs.Add([System.Text.StringBuilder]::new('q'))", raise_on_error=True)
+        col = shell.make_proxy("", "$vs_col_objs")
+        items = list(col)
+        assert [i.ToString() for i in items] == ["p", "q"]
+        assert items[1].ps_origin == "$vs_col_objs.Item(1)"
+
+    def test_proxy_select_bulk_read(self, shell):
+        shell.run("$vs_sel = [System.Collections.Generic.List[object]]::new(); "
+                  "$vs_sel.Add([pscustomobject]@{ Name='a'; When=[datetime]::new(2024,1,2); "
+                  "Kind=[System.DayOfWeek]::Monday; Inner=[System.Text.StringBuilder]::new('x') }); "
+                  "$vs_sel.Add([pscustomobject]@{ Name='b'; When=$null; Kind=[System.DayOfWeek]::Friday; "
+                  "Inner=$null })", raise_on_error=True)
+        col = shell.make_proxy("", "$vs_sel")
+        rows = col.proxy_select("Name", "Kind", when="When", inner="Inner.ToString()",
+                                length="Name.Length")
+        assert rows == [
+            {"Name": "a", "Kind": "Monday", "when": "2024-01-02T00:00:00.0000000",
+             "inner": "x", "length": 1},
+            {"Name": "b", "Kind": "Friday", "when": None, "inner": None, "length": 1},
+        ]
+        shell.run("$vs_sel_empty = [System.Collections.Generic.List[object]]::new()",
+                  raise_on_error=True)
+        assert shell.make_proxy("", "$vs_sel_empty").proxy_select("Name") == []
+        sb = shell.make_proxy("", "System.Text.StringBuilder('solo')")
+        assert sb.proxy_select("Length") == [{"Length": 4}]          # non-collection: one row
+        with pytest.raises(ValueError):
+            col.proxy_select()
+
+    def test_generic_on_static_type_proxy(self, shell):
+        arr = shell.make_proxy("", "[System.Array]")
+        empty = arr.generic("Empty", "System.Int32")()                 # [Array]::Empty[int]()
+        assert len(empty) == 0
+        with pytest.raises(TypeError):
+            shell.make_proxy("", "System.Text.StringBuilder").generic("Append", 3)
+
+    def test_read_error_is_reported_in_one_round_trip(self, shell):
+        sb = shell.make_proxy("", "System.Text.StringBuilder")
+        with pytest.raises(ExecutionError, match="Read property"):
+            sb.Chars(99)     # ArgumentOutOfRange inside the merged assign+read command
+
+    def test_non_collection_raises_but_is_truthy(self, shell):
+        sb = shell.make_proxy("", "System.Text.StringBuilder")
+        assert bool(sb) is True
+        with pytest.raises(TypeError, match="not a collection"):
+            len(sb)
+        with pytest.raises(TypeError):
+            iter(sb)

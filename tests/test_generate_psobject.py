@@ -28,10 +28,14 @@ class TestMapPsType:
         assert map_ps_type("bool")[0] == "bool"
         assert map_ps_type("System.Byte")[0] == "int"
 
-    def test_array_becomes_list(self):
-        annotation, typing_bits, _ = map_ps_type("byte[]")
-        assert annotation == "List[int]"
-        assert "List" in typing_bits
+    def test_arrays(self):
+        # byte[] moves through the bridge as bytes; other arrays are proxies
+        # implementing the read-only sequence protocol.
+        assert map_ps_type("byte[]")[0] == "bytes"
+        assert map_ps_type("System.Byte[]")[0] == "bytes"
+        annotation, typing_bits, _ = map_ps_type("int[]")
+        assert annotation == "Sequence[int]"
+        assert "Sequence" in typing_bits
 
     def test_char_array_is_str(self):
         # PowerShell's binder converts a string to char[], and List[str]
@@ -47,11 +51,16 @@ class TestMapPsType:
     def test_generic_dictionary(self):
         annotation, _, _ = map_ps_type(
             "System.Collections.Generic.Dictionary`2[System.String,System.Int32]")
-        assert annotation == "Dict[str, int]"
+        assert annotation == "Mapping[str, int]"
 
-    def test_generic_list(self):
+    def test_generic_collections_are_read_only_protocols(self):
         assert map_ps_type(
-            "System.Collections.Generic.List`1[System.String]")[0] == "List[str]"
+            "System.Collections.Generic.List`1[System.String]")[0] == "Sequence[str]"
+        assert map_ps_type(
+            "System.Collections.ObjectModel.ReadOnlyCollection`1[System.String]")[0] == \
+            "Sequence[str]"
+        assert map_ps_type(
+            "System.Collections.Generic.HashSet`1[System.Int32]")[0] == "AbstractSet[int]"
 
     def test_unknown_is_any(self):
         assert map_ps_type("Some.Unknown.Type")[0] == "Any"
@@ -67,16 +76,17 @@ class TestParseParameters:
         params = parse_parameters("string name, int count")
         assert [(p[0], p[1]) for p in params] == [("name", "str"), ("count", "int")]
 
-    def test_array_parameter_keeps_list_annotation(self):
+    def test_array_parameter_annotations(self):
         params = parse_parameters("byte[] buffer, int offset, int count")
         assert params[0][0] == "buffer"
-        assert params[0][1] == "List[int]"
+        assert params[0][1] == "bytes"
+        assert parse_parameters("string[] names")[0][1] == "Sequence[str]"
 
     def test_generic_parameter_with_comma_inside(self):
         params = parse_parameters(
             "System.Collections.Generic.Dictionary`2[System.String,System.Int32] map, int other")
         assert len(params) == 2
-        assert params[0][1] == "Dict[str, int]"
+        assert params[0][1] == "Mapping[str, int]"
         assert params[1] == ("other", "int", params[1][2], params[1][3])
 
     def test_nameless_parameter_gets_generated_name(self):
@@ -110,7 +120,7 @@ class TestSignatures:
             "Join", {"Definition": "static string Join(string separator, string[] value)"},
             typing_bits, runtime_bits)
         assert len(lines) == 1
-        assert "def Join(self, separator: str, value: List[str]) -> str" in lines[0]
+        assert "def Join(self, separator: str, value: Sequence[str]) -> str" in lines[0]
 
     def test_unparseable_falls_back_to_varargs(self):
         typing_bits, runtime_bits = set(), set()
@@ -234,7 +244,7 @@ class TestRenderProtocol:
         assert "class MyProxy(Protocol):" in source
         assert "def Length(self) -> int: ..." in source
         assert "def Name(self, value: str) -> None: ..." in source   # setter
-        assert "def Read(self, buffer: List[int], offset: int, count: int) -> int: ..." in source
+        assert "def Read(self, buffer: bytes, offset: int, count: int) -> int: ..." in source
         assert "def proxy_schema(self) -> Dict[str, Any]: ..." in source
         assert "list[Any]" not in source   # py3.8-compatible typing only
 
@@ -318,6 +328,9 @@ class TestGenerateEndToEnd:
         assert "class DateTime(Protocol):" in source
         assert "def Year(self) -> int: ..." in source
         assert "def AddDays(self" in source
+        # Statics of the type are listed too (Get-Member -Static), tagged.
+        assert "def IsLeapYear(self, year: int) -> bool: ...  # static" in source
+        assert "def ReferenceEquals" not in source
 
     def test_generate_for_custom_object(self, shell, tmp_path):
         from virtualshell.generate_psobject import generate
