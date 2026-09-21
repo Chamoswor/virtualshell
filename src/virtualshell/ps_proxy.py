@@ -887,8 +887,10 @@ class PsProxy:
             "$__vs_ok = $false\n$__vs_err = $null\n"
             "try {\n" + assign + "\n$__vs_ok = $?\n} catch { $__vs_err = $_ }\n"
             "if ($__vs_ok) {\n" + _DISCRIMINATOR.format(ret=ret) + "\n}"
-            " elseif ($null -ne $__vs_err) { Write-Error -ErrorRecord $__vs_err }"
-            " else { Write-Error 'expression reported an error' }"
+            # Rethrow keeps the original message and position (Write-Error
+            # -ErrorRecord would print this whole script as the failing command).
+            " elseif ($null -ne $__vs_err) { throw $__vs_err }"
+            " else { throw 'expression reported an error' }"
         )
         out = self._run(script, label=label)
         try:
@@ -1370,8 +1372,9 @@ class PsProxy:
                     types=type_list, ntypes=len(type_names), nargs=len(args)).splitlines()
             target = "$null" if self._static else self._ref
             arg_array = "[object[]]@(" + ", ".join(ps_args) + ")"
-            call = (f"if (${var}.IsStatic) {{ ${var}.Invoke($null, {arg_array}) }} "
-                    f"else {{ ${var}.Invoke({target}, {arg_array}) }}")
+            # $( ) : an if-statement is not an expression in Windows PowerShell 5.1.
+            call = (f"$(if (${var}.IsStatic) {{ ${var}.Invoke($null, {arg_array}) }} "
+                    f"else {{ ${var}.Invoke({target}, {arg_array}) }})")
             label = f"Call {self._schema.type_name}.{name}<{','.join(type_names)}>"
             result = self._fetch_value(call, label=label, prelude=prelude)
             if cache is not None:
@@ -1401,8 +1404,11 @@ class PsProxy:
         for key, expr in columns:
             if not expr or "\n" in expr or "\r" in expr:
                 raise ValueError(f"Invalid expression for column {key!r}")
+        # A cell that fails (e.g. .ToString() on a null member) becomes null
+        # rather than failing the whole listing.
         cells = "\n".join(
-            f"        $__vs_row[{_ps_quote(key)}] = (& $__vs_cell ($__vs_e.{expr}))"
+            f"        $__vs_row[{_ps_quote(key)}] = $(try {{ & $__vs_cell ($__vs_e.{expr}) }}"
+            f" catch {{ $null }})"
             for key, expr in columns)
         source = f"@({self._ref}.Values)" if self._is_mapping_like() else f"@({self._ref})"
         script = _SELECT_SCRIPT.format(source=source, cells=cells)

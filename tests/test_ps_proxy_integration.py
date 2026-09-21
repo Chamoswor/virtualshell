@@ -562,8 +562,12 @@ class TestCollectionProtocol:
 
     def test_read_error_is_reported_in_one_round_trip(self, shell):
         sb = shell.make_proxy("", "System.Text.StringBuilder")
-        with pytest.raises(ExecutionError, match="Read property"):
+        with pytest.raises(ExecutionError) as excinfo:
             sb.Chars(99)     # ArgumentOutOfRange inside the merged assign+read command
+        message = str(excinfo.value)
+        assert message.startswith("Call System.Text.StringBuilder.Chars failed: ")
+        assert "Chars" in message
+        assert "$__vs_ok" not in message      # the wrapper script itself is not echoed
 
     def test_non_collection_raises_but_is_truthy(self, shell):
         sb = shell.make_proxy("", "System.Text.StringBuilder")
