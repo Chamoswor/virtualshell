@@ -1,6 +1,28 @@
 ### Page: Changelog
 
 ```
+## 1.4.0
+
+API polish from agent field testing (TIA Portal automation):
+
+- `Shell(timeout=...)` replaces `Shell(timeout_seconds=...)` — the session
+  default now has the same name as the per-call `timeout=` argument.
+  `timeout_seconds=` still works as a deprecated alias (DeprecationWarning)
+- `run_objects` normalizes values before serialization: DateTime/
+  DateTimeOffset -> ISO-8601 strings (no more PS 5.1 `/Date(...)/`), enums ->
+  their name, Guid/TimeSpan/Uri/Version/IPAddress -> strings, FileInfo/
+  DirectoryInfo -> the full path string; other rich .NET objects at the
+  `depth` boundary become `ToString()` instead of a property bag. Output is
+  now identical on both editions. `raw=True` restores plain ConvertTo-Json.
+  Breaking: results that used to be nested property bags (e.g. FileInfo
+  values) are now compact strings
+- New `ScriptBlockDelegateWarning` (exported): emitted before executing a
+  command that converts a PowerShell scriptblock into a .NET delegate/event
+  handler (`[SomeEventHandler]{...}` casts, `$obj.add_Event({...})`), which
+  can crash the host with a StackOverflow when the delegate fires on a
+  thread without a runspace. The command still runs; `script()` file content
+  is screened too
+
 ## 1.3.0
 
 Agent-friendly execution surface (and a friendlier API for humans):

@@ -8,7 +8,8 @@
 Use it when you need any of:
   - a persistent pwsh session (modules, variables, auth context survive between calls)
   - structured results (stdout, stderr, exit code, success, timing) and typed exceptions
-  - PowerShell objects as Python objects (`run_objects`, PSObject) or live typed proxies
+  - PowerShell objects as Python objects (`run_objects`, PSObject) or live typed
+    proxies - values normalized for agents (ISO dates, paths and enum names as strings)
   - output budgets for LLM context (`max_output` + `fetch_output` paging)
   - guardrails: allow/deny policies, read-only lanes, human confirmation, -WhatIf dry runs
   - cancel of a runaway command without losing session state (`interrupt` + `checkpoint`)

@@ -22,7 +22,7 @@ pytestmark = integration
 def shell(edition):
     from virtualshell import Shell
 
-    sh = Shell(timeout_seconds=60, powershell_edition=edition).start()
+    sh = Shell(timeout=60, powershell_edition=edition).start()
     yield sh
     sh.stop(force=True)
 

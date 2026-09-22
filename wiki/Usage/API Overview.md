@@ -4,7 +4,8 @@
 
 **Shell instantiation**
 
-- `Shell(powershell_path: str|None=None, working_directory: str|Path|None=None, timeout_seconds: float=5.0, auto_restart_on_timeout: bool=True, environment: Optional[Dict[str,str]]=None, stdin_buffer_size: int=65536, initial_commands: Optional[List[str]]=None, set_UTF8: bool=True, strip_results: bool=True, powershell_edition: str="auto", policy: ExecutionPolicy|None=None, max_output: int|None=None, raise_on_error: bool=False) -> Shell`
+- `Shell(powershell_path: str|None=None, working_directory: str|Path|None=None, timeout: float=5.0, auto_restart_on_timeout: bool=True, environment: Optional[Dict[str,str]]=None, stdin_buffer_size: int=65536, initial_commands: Optional[List[str]]=None, set_UTF8: bool=True, strip_results: bool=True, powershell_edition: str="auto", policy: ExecutionPolicy|None=None, max_output: int|None=None, raise_on_error: bool=False) -> Shell`
+  (`timeout_seconds=` is a deprecated alias for `timeout=`; it still works but emits a `DeprecationWarning`.)
     - Create a new PowerShell shell controller.
     - See [Configuration](#configuration) for parameter details.
     - `run()` and friends start the backend automatically; an explicit `start()` is optional.
@@ -14,7 +15,7 @@
 - `is_running: bool` · `is_restarting: bool`
 - `run(cmd: str|Iterable[str], timeout: float|None=None, raise_on_error: bool|None=None, max_output: int|None=None) -> ExecutionResult | List[ExecutionResult]`
 - `run_async(cmd: str|Sequence[str], callback=None, timeout: float|None=None) -> Future[...]`
-- `run_objects(cmd: str, select: str|Sequence[str]|None=None, first: int|None=None, depth: int=2, timeout: float|None=None, raise_on_error=True) -> list`  _(structured results via ConvertTo-Json; see [Agents & Guardrails](Agents-&-Guardrails))_
+- `run_objects(cmd: str, select: str|Sequence[str]|None=None, first: int|None=None, depth: int=2, timeout: float|None=None, raise_on_error=True, raw: bool=False) -> list`  _(structured results, normalized: ISO dates, paths and enum names as strings; `raw=True` for plain ConvertTo-Json output; see [Agents & Guardrails](Agents-&-Guardrails))_
 - `fetch_output(key: str, offset: int=0, max_output: int|None=None) -> OutputSlice`  _(page through output truncated by a `max_output` budget)_
 - `script(script_path: str|Path, args: Iterable[str] | Dict[str,str] | None=None, timeout: float|None=None, dot_source=False, raise_on_error: bool|None=None) -> ExecutionResult`
 - `script_async(..., callback=None, timeout: float|None=None, dot_source=False) -> Future[ExecutionResult]`

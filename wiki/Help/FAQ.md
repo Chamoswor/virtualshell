@@ -4,7 +4,7 @@
 - **How to run commands asynchronously?** Use `run_async()` to get a `Future` for non-blocking execution.
 - **Can I keep state between commands?** Yes; the backend process persists session state until stopped.
 - **Where is the session saved?** `save_session()` writes an XML snapshot; see `session_path`.
-- **What about timeouts?** Use the `timeout` parameter per call or set a default via `timeout_seconds`.
+- **What about timeouts?** Use the `timeout` parameter per call or set a session default via `Shell(timeout=...)`.
 - **How to handle long-running commands?** Consider `auto_restart_on_timeout=True` to recover state after timeouts.
 - **What if PowerShell is not found?** Ensure `pwsh` is on PATH (or Windows PowerShell is installed, on Windows), pick an edition with `powershell_edition`, or set `powershell_path` explicitly.
 - **How to fix ImportError for compiled extensions?** Ensure the wheel matches your OS/arch/Python; try a clean venv and reinstall.

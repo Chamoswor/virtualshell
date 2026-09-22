@@ -25,7 +25,7 @@ method starts the backend on first use; `stop()` (or a `with` block) ends it.
 ```python
 from virtualshell import Shell
 
-with Shell() as sh:
+with Shell(timeout=30) as sh:       # default per-command timeout in seconds
     sh.run("Import-Module MyVendorModule")     # stays loaded
     r = sh.run("Get-Date")
     r.out          # stdout, stripped ("2" for "1+1")
@@ -35,6 +35,10 @@ with Shell() as sh:
                    # -1 timeout, -2 restarting, -3 host died
     r.execution_time
 ```
+
+`Shell(timeout=...)` (default 5.0 s) is the session default; every execution
+method also takes a per-call `timeout=`. (`timeout_seconds=` is a deprecated
+alias for the constructor argument.)
 
 Default error behavior differs: `run()` returns failures as data
 (`success=False`, text in `err`) unless you pass `raise_on_error=True`, while
@@ -63,6 +67,13 @@ Serialization happens in-session via ConvertTo-Json; assignments inside the
 command persist. Terminating errors and stderr raise `ExecutionError` by
 default; `raise_on_error=False` returns the objects that were produced anyway.
 Use `select=`/`first=` to keep results small at the source.
+
+Values are normalized so results stay compact and identical on both editions:
+dates come back as ISO-8601 strings (never `/Date(...)/`), enums as their
+name, Guid/TimeSpan/Uri/Version as strings, FileInfo/DirectoryInfo as the
+full path string, and any other rich .NET object at the `depth` boundary as
+its `ToString()` instead of a property bag. Pass `raw=True` for plain
+`ConvertTo-Json` output (full property bags, faster for huge dumps).
 
 ## Keep output out of your context window
 
@@ -148,6 +159,16 @@ Limits — a policy is a guardrail, not a sandbox: `$x = 5` is an expression
 `$WhatIfPreference` only affects cmdlets that implement ShouldProcess —
 `[IO.File]::Delete(...)`, `cmd /c del` and other non-cmdlet paths run for
 real even under `dry_run_destructive`.
+
+## Don't hand scriptblocks to .NET events
+
+Never register a PowerShell scriptblock as a .NET delegate or event handler
+(`[System.ResolveEventHandler]{ ... }` casts, `$obj.add_Event({ ... })`):
+when the delegate fires on a thread without a runspace it crashes the host
+(StackOverflow) and loses all session state. virtualshell detects the pattern
+and emits a `ScriptBlockDelegateWarning` (the command still runs). Compile
+the handler in C# with `Add-Type` and attach that instead —
+`Register-ObjectEvent` (engine-managed) is also safe.
 
 ## Long-running or runaway commands
 

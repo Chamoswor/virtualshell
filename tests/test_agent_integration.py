@@ -19,7 +19,7 @@ pytestmark = integration
 def shell(edition):
     from virtualshell import Shell
 
-    sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+    sh = Shell(timeout=30, powershell_edition=edition).start()
     yield sh
     sh.stop(force=True)
 
@@ -28,7 +28,7 @@ class TestAutoStart:
     def test_run_without_start(self, edition):
         from virtualshell import Shell
 
-        sh = Shell(timeout_seconds=30, powershell_edition=edition)
+        sh = Shell(timeout=30, powershell_edition=edition)
         try:
             assert sh.run("1+1").out == "2"  # strip default + auto-start
         finally:
@@ -76,6 +76,46 @@ class TestRunObjects:
 
     def test_unicode_survives_json(self, shell):
         assert shell.run_objects("'æøå'") == ["æøå"]
+
+
+class TestRunObjectsNormalization:
+    """run_objects normalizes noisy .NET values on both editions."""
+
+    def test_dates_are_iso_strings(self, shell):
+        out = shell.run_objects("Get-Date")
+        assert isinstance(out[0], str)
+        assert "/Date(" not in out[0]          # the PS 5.1 ConvertTo-Json noise
+        assert out[0][4] == "-" and "T" in out[0]  # ISO-8601 round-trip format
+
+    def test_nested_dates_are_iso_strings(self, shell):
+        out = shell.run_objects("[pscustomobject]@{ when = (Get-Date) }")
+        assert isinstance(out[0]["when"], str) and "T" in out[0]["when"]
+
+    def test_fileinfo_becomes_path_string(self, shell):
+        out = shell.run_objects("Get-Item .")
+        assert len(out) == 1 and isinstance(out[0], str)
+
+    def test_nested_fileinfo_becomes_path_string(self, shell):
+        out = shell.run_objects("[pscustomobject]@{ p = (Get-Item .) }")
+        assert isinstance(out[0]["p"], str)
+
+    def test_enum_becomes_name(self, shell):
+        assert shell.run_objects("[System.DayOfWeek]::Monday") == ["Monday"]
+
+    def test_guid_and_timespan_become_strings(self, shell):
+        out = shell.run_objects("[guid]::Empty; [timespan]::FromSeconds(90)")
+        assert out == ["00000000-0000-0000-0000-000000000000", "00:01:30"]
+
+    def test_rich_leaf_at_depth_boundary_stringifies(self, shell):
+        out = shell.run_objects("@{ p = (Get-Process -Id $PID) }", depth=1)
+        assert isinstance(out[0]["p"], str)
+
+    def test_numbers_stay_typed(self, shell):
+        assert shell.run_objects("1; 2.5; $true") == [1, 2.5, True]
+
+    def test_raw_true_keeps_property_bags(self, shell):
+        out = shell.run_objects("Get-Item .", raw=True)
+        assert isinstance(out[0], dict)
 
 
 class TestOutputBudget:
@@ -242,7 +282,7 @@ class TestInterrupt:
     def test_interrupt_cancels_and_restores(self, edition):
         from virtualshell import Shell
 
-        sh = Shell(timeout_seconds=60, powershell_edition=edition).start()
+        sh = Shell(timeout=60, powershell_edition=edition).start()
         try:
             sh.run("$global:vs_int = 'kept'")
             sh.checkpoint("pre")
@@ -271,7 +311,7 @@ class TestInterrupt:
     def test_interrupt_restore_false_gives_clean_host(self, edition):
         from virtualshell import Shell
 
-        sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+        sh = Shell(timeout=30, powershell_edition=edition).start()
         try:
             sh.run("$vs_clean = 'dirty'")
             sh.checkpoint("kept-on-disk")
@@ -287,7 +327,7 @@ class TestTimeoutRestoresCheckpoint:
     def test_checkpoint_survives_timeout_auto_restart(self, edition):
         from virtualshell import Shell
 
-        sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+        sh = Shell(timeout=30, powershell_edition=edition).start()
         try:
             sh.run("$vs_to = 'kept'")
             sh.checkpoint("pre-timeout")

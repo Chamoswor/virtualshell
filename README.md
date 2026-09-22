@@ -25,7 +25,8 @@ get:
 * ~2–4 ms execution latency
 * async and batch execution
 * structured, predictable results — including `run_objects()` returning
-  Python objects instead of text
+  Python objects instead of text, with noisy .NET values normalized
+  (ISO-8601 dates, paths and enum names as plain strings)
 * guardrails for agent-driven automation: allow/deny policies, read-only
   lanes, confirmation hooks, output budgets, fast interrupt with state
   restore
@@ -187,7 +188,7 @@ Linux, and macOS.
 ```python
 from virtualshell import Shell, ZeroCopyBridge
 
-with Shell(timeout_seconds=60) as shell:
+with Shell(timeout=60) as shell:
     with ZeroCopyBridge(shell) as bridge:
         data = b"x" * 1_000_000
         bridge.send(data, "buf")
@@ -262,7 +263,7 @@ Shell(
     powershell_path="C:/Program Files/PowerShell/7/pwsh.exe",  # optional; overrides the edition
     working_directory="C:/automation",
     environment={"MY_FLAG": "1"},
-    timeout_seconds=10,
+    timeout=10,
     auto_restart_on_timeout=True,
     initial_commands=[
         "$ErrorActionPreference = 'Stop'",

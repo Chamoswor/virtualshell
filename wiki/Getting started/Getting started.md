@@ -21,7 +21,7 @@ pip install virtualshell
 ```python
 from virtualshell import Shell
 
-with Shell(timeout_seconds=5) as sh:
+with Shell(timeout=5) as sh:
     res = sh.run("'Hello from PowerShell'")  # literal string prints itself
     print(res.out)  # -> Hello from PowerShell
 ```

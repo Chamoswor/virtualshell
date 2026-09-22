@@ -13,7 +13,7 @@
 - Check `shell.edition`: with the default `"auto"` you get Windows PowerShell 5.1 when `pwsh` is missing, and 5.1 lacks PowerShell 7 syntax (`?:`, `??`, `$PSStyle`, ...). Install pwsh or pin `powershell_edition="core"`.
 
 **Timeouts**
-- Increase `timeout` per call or `timeout_seconds` default.
+- Increase `timeout` per call or the session default `Shell(timeout=...)`.
 - Consider `auto_restart_on_timeout=True` for long‑running commands.
 
 **Encoding issues**

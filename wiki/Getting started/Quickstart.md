@@ -13,7 +13,7 @@ with Shell() as sh:
 # Batch of commands
 from virtualshell import Shell
 
-with Shell(timeout_seconds=5) as sh:
+with Shell(timeout=5) as sh:
     results = sh.run(["$PSVersionTable.PSVersion", "Get-Random"])  # returns List[ExecutionResult]
     for i, r in enumerate(results):
         print(i, r.success, r.out)

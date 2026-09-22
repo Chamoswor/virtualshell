@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import tempfile
 import time
+import warnings
 import concurrent.futures as cf
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +80,7 @@ from .errors import (
     ExecutionError,
     PromptBlockedError,
     PolicyViolationError,
+    ScriptBlockDelegateWarning,
 )
 
 # ---------- Utils ----------
@@ -113,6 +116,73 @@ _PROMPT_MARKERS = (
     # In an interactive host PowerShell would prompt for a missing mandatory
     # parameter; with -NonInteractive it fails with this message instead.
     "missing mandatory parameters",
+)
+
+
+#: Heuristic for a PowerShell scriptblock being converted into a .NET delegate
+#: or event handler: a cast like ``[System.ResolveEventHandler]{ ... }`` (any
+#: type name with a delegate-style suffix, optionally generic) or an event
+#: subscription like ``$obj.add_Click({ ... })``. Such handlers can fire on a
+#: thread that has no runspace, which crashes the host process — see
+#: :class:`ScriptBlockDelegateWarning`.
+_DELEGATE_PATTERN = re.compile(
+    r"\[\s*[\w.+]*?(?:Handler|Callback|ThreadStart|Action|Func|Predicate)"
+    r"\s*(?:\[[^\]]*\])?\s*\]\s*\{"
+    r"|\.\s*add_\w+\s*\(\s*\{"
+)
+
+
+def _warn_scriptblock_delegates(text: str) -> None:
+    """Warn (once per distinct match) when `text` looks like it turns a
+    scriptblock into a .NET delegate/event handler. Never blocks execution."""
+    m = _DELEGATE_PATTERN.search(text)
+    if not m:
+        return
+    snippet = " ".join(m.group(0).split())
+    if len(snippet) > 60:
+        snippet = snippet[:57] + "..."
+    warnings.warn(
+        "This command converts a PowerShell scriptblock into a .NET delegate/"
+        f"event handler ({snippet!r}). If the delegate fires on a thread "
+        "without a runspace it can crash the PowerShell host (StackOverflow) "
+        "and lose all session state. Prefer a handler compiled in C# via "
+        "Add-Type. The command still runs.",
+        ScriptBlockDelegateWarning,
+        stacklevel=4,
+    )
+
+
+#: In-session value normalizer for ``run_objects`` (PowerShell 5.1-compatible).
+#: Keeps primitives, renders temporal/identifier types as strings (ISO-8601
+#: for dates, matching ``ps_proxy``'s ``ToString('o')`` convention), collapses
+#: FileSystemInfo to its path, expands dictionaries/collections/property bags
+#: down to the depth budget, and stringifies rich .NET leaves at the boundary.
+_NORMALIZER_PS = (
+    "function global:__vs_norm($v, $d) {\n"
+    "  if ($null -eq $v) { return $null }\n"
+    "  if ($v -is [string] -or $v -is [bool]) { return $v }\n"
+    "  if ($v -is [datetime] -or $v -is [System.DateTimeOffset]) { return $v.ToString('o') }\n"
+    "  if ($v -is [enum] -or $v -is [guid] -or $v -is [timespan] -or $v -is [uri] -or "
+    "$v -is [version] -or $v -is [System.Net.IPAddress]) { return $v.ToString() }\n"
+    "  if ($v -is [System.IO.FileSystemInfo]) { return $v.FullName }\n"
+    "  if ($v.GetType().IsPrimitive -or $v -is [decimal]) { return $v }\n"
+    "  if ($d -le 0) { return [string]$v }\n"
+    "  if ($v -is [System.Collections.IDictionary]) {\n"
+    "    $h = [ordered]@{}\n"
+    "    foreach ($k in $v.Keys) { $h[[string]$k] = __vs_norm $v[$k] ($d - 1) }\n"
+    "    return $h\n"
+    "  }\n"
+    "  if ($v -is [System.Collections.IEnumerable]) {\n"
+    "    $a = [System.Collections.ArrayList]::new()\n"
+    "    foreach ($i in $v) { [void]$a.Add((__vs_norm $i ($d - 1))) }\n"
+    "    return ,$a.ToArray()\n"
+    "  }\n"
+    "  $h = [ordered]@{}\n"
+    "  foreach ($p in $v.PSObject.Properties) {\n"
+    "    try { $h[$p.Name] = __vs_norm $p.Value ($d - 1) } catch { $h[$p.Name] = $null }\n"
+    "  }\n"
+    "  return $h\n"
+    "}\n"
 )
 
 
@@ -174,7 +244,7 @@ class Shell:
         self,
         powershell_path: Optional[str] = None,
         working_directory: Optional[Union[str, Path]] = None,
-        timeout_seconds: float = 5.0,
+        timeout: float = 5.0,
         auto_restart_on_timeout: bool = True,
         environment: Optional[Dict[str, str]] = None,
         stdin_buffer_size: int = 64 * 1024,
@@ -186,6 +256,7 @@ class Shell:
         max_output: Optional[int] = None,
         raise_on_error: bool = False,
         cpp_module: Any = None,
+        timeout_seconds: Optional[float] = None,
     ) -> None:
         """Configure a new Shell instance.
 
@@ -196,9 +267,10 @@ class Shell:
             from `powershell_edition`.
         working_directory : Optional[Union[str, Path]]
             Working directory for the child process. Resolved to an absolute path.
-        timeout_seconds : float
-            Default per-command timeout used when a method's `timeout` is not provided.
-            default is 5.0.
+        timeout : float
+            Default per-command timeout in seconds, used when a method's
+            `timeout` argument is not provided. Default is 5.0. (Whole
+            seconds; fractions are truncated.)
         auto_restart_on_timeout : bool
             If True, the backend process is automatically restarted after a timeout.
             This is useful for long-running commands that may exceed the timeout. If False, the command will fail with a timeout error.
@@ -241,7 +313,20 @@ class Shell:
             actually running.
         cpp_module : Any
             For testing/DI: provide a custom module exposing the C++ API surface.
+        timeout_seconds : Optional[float]
+            Deprecated alias for `timeout` (kept so pre-1.4 code keeps
+            working). Emits a DeprecationWarning and overrides `timeout`
+            when given.
         """
+        if timeout_seconds is not None:
+            warnings.warn(
+                "Shell(timeout_seconds=...) is deprecated; use "
+                "Shell(timeout=...) — same meaning, and now consistent with "
+                "the per-call timeout= argument.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            timeout = timeout_seconds
         mod = cpp_module or _module.core
         cfg: Config = mod.Config()
         if powershell_path:
@@ -254,7 +339,7 @@ class Shell:
         cfg.powershell_edition = edition
         if working_directory:
             cfg.working_directory = str(Path(working_directory).resolve())
-        cfg.timeout_seconds = int(timeout_seconds or 0)
+        cfg.timeout_seconds = int(timeout or 0)
         cfg.auto_restart_on_timeout = bool(auto_restart_on_timeout)
 
         if environment:
@@ -372,8 +457,10 @@ class Shell:
         """Enforce the shell's policy on `command`.
 
         Returns the text to execute (possibly rewritten into a -WhatIf dry
-        run) or raises :class:`PolicyViolationError`. No-op without a policy.
+        run) or raises :class:`PolicyViolationError`. Without a policy only
+        the scriptblock-delegate prescreen runs (warning, never a block).
         """
+        _warn_scriptblock_delegates(command)
         if self._policy is None:
             return command
         self._ensure_ready()
@@ -384,16 +471,23 @@ class Shell:
         return decision.command
 
     def _check_script_policy(self, script_path: Union[str, Path]) -> None:
-        """Enforce the policy on a script file's content before running it."""
-        if self._policy is None:
-            return
-        self._ensure_ready()
+        """Enforce the policy on a script file's content before running it.
+
+        Also runs the scriptblock-delegate prescreen on the file content,
+        with or without a policy."""
         try:
             content = Path(script_path).read_text(encoding="utf-8-sig", errors="replace")
         except OSError as e:
+            if self._policy is None:
+                # Warn-only path: an unreadable file fails naturally at run time.
+                return
             raise PolicyViolationError(
                 f"policy could not read script {script_path}: {e}",
                 command=str(script_path)) from e
+        _warn_scriptblock_delegates(content)
+        if self._policy is None:
+            return
+        self._ensure_ready()
         decision = self._policy.inspect(content, self._command_names(content))
         if not decision.allowed:
             raise PolicyViolationError(decision.reason, command=str(script_path),
@@ -985,6 +1079,7 @@ class Shell:
         depth: int = 2,
         timeout: Optional[float] = None,
         raise_on_error: bool = True,
+        raw: bool = False,
     ) -> List[Any]:
         """Execute a command and return its output as Python objects, not text.
 
@@ -993,6 +1088,16 @@ class Shell:
 
             sh.run_objects("Get-Process", select=["Name", "Id"], first=5)
             # -> [{'Name': 'pwsh', 'Id': 1234}, ...]
+
+        Values are normalized before serialization so results stay compact
+        and identical on both PowerShell editions:
+
+        - DateTime / DateTimeOffset -> ISO-8601 strings (never ``/Date(...)/``)
+        - enum -> its name; Guid / TimeSpan / Uri / Version / IPAddress -> string
+        - FileInfo / DirectoryInfo -> the full path string
+        - dictionaries, arrays and PSCustomObjects expand as usual; any other
+          rich .NET object at the `depth` boundary becomes its ``ToString()``
+          instead of a property bag.
 
         - `select`: property name(s) to keep (``Select-Object -Property``) —
           the cheapest way to keep results small.
@@ -1003,6 +1108,9 @@ class Shell:
         - `raise_on_error=True` (default): terminating errors and stderr output
           raise `ExecutionError` (or `PromptBlockedError`); with False you get
           whatever objects were produced despite non-terminating errors.
+        - `raw=True`: skip normalization and serialize with plain
+          ``ConvertTo-Json`` (edition-dependent date formats, full property
+          bags; also faster for very large dumps).
 
         Always returns a list (empty for no output). Runs in the current
         scope, so assignments inside `cmd` persist in the session. The Shell's
@@ -1024,10 +1132,19 @@ class Shell:
             pipeline += f" | Select-Object -First {int(first)}"
 
         ps_depth = max(1, int(depth)) + 2  # envelope + data array levels
+        normalize = ""
+        if not raw:
+            normalize = (
+                _NORMALIZER_PS
+                + "if ($null -eq $__vs_err) { try { $__vs_obj = @($__vs_obj | ForEach-Object "
+                f"{{ __vs_norm $_ {max(1, int(depth))} }}) }} "
+                "catch { $__vs_err = ('normalization failed: ' + $_.Exception.Message) } }\n"
+            )
         script = (
             "$__vs_err = $null\n"
             "$__vs_obj = @()\n"
             "try { $__vs_obj = @(" + pipeline + ") } catch { $__vs_err = ($_ | Out-String).Trim() }\n"
+            + normalize +
             "try { $__vs_json = ConvertTo-Json -InputObject ([pscustomobject]@{ ok = ($null -eq $__vs_err); error = $__vs_err; data = $__vs_obj }) "
             f"-Depth {ps_depth} -Compress -WarningAction SilentlyContinue }}\n"
             "catch { $__vs_json = ConvertTo-Json -InputObject ([pscustomobject]@{ ok = $false; error = ('JSON conversion failed: ' + $_.Exception.Message); data = @() }) -Compress }\n"

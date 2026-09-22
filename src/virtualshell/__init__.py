@@ -21,12 +21,14 @@ from .errors import (
     ExecutionError,
     PromptBlockedError,
     PolicyViolationError,
+    ScriptBlockDelegateWarning,
 )
 
 __all__ = [
     "VirtualShellError", "PowerShellNotFoundError",
     "ExecutionTimeoutError", "ExecutionError",
     "PromptBlockedError", "PolicyViolationError",
+    "ScriptBlockDelegateWarning",
     "__version__", "Shell", "ExecutionResult", "BatchProgress", "ExitCode", "Config",
     "Checkpoint", "ExecutionPolicy", "ConfirmRequest", "PolicyDecision", "OutputSlice",
     "quote_pwsh_literal",

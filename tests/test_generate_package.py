@@ -153,7 +153,7 @@ _GRAPH_CS = (
 def shell(edition):
     from virtualshell import Shell
 
-    sh = Shell(timeout_seconds=60, powershell_edition=edition).start()
+    sh = Shell(timeout=60, powershell_edition=edition).start()
     yield sh
     sh.stop(force=True)
 
@@ -213,7 +213,7 @@ class TestGeneratePackage:
         try:
             assert sdk.Portal.__ps_type_name__ == "VsGraph.Portal"
             assert sdk.Project.__ps_assembly__.lower() == str(graph_dll).lower()
-            with Shell(timeout_seconds=60, powershell_edition=edition) as fresh:
+            with Shell(timeout=60, powershell_edition=edition) as fresh:
                 portal = fresh.make_proxy(sdk.Portal)             # loads VsGraph.dll, creates
                 assert portal.GetProcess().Id == 42
                 assert portal.Projects.Item(0).Name == "first"

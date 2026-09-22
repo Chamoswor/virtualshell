@@ -266,7 +266,7 @@ def analyze_performance_characteristics():
     """Startup time (ctx manager), command overhead (NOOP), and output size impact."""
     # Startup
     s0 = time.perf_counter()
-    with Shell(timeout_seconds=30, auto_restart_on_timeout=True) as sh:
+    with Shell(timeout=30, auto_restart_on_timeout=True) as sh:
         startup_time = time.perf_counter() - s0
         sh.run('Write-Output "warmup"')
 
@@ -296,7 +296,7 @@ def analyze_performance_characteristics():
     }
 
 def benchmark_parallel_shells(num_shells=4, cmds_per_shell=50, cmd=MICRO):
-    shells = [Shell(timeout_seconds=30) for _ in range(num_shells)]
+    shells = [Shell(timeout=30) for _ in range(num_shells)]
     for sh in shells:
         sh.start()
     try:
@@ -339,7 +339,7 @@ def run_all(cfg):
     gc.disable()
 
     try:
-        with Shell(timeout_seconds=cfg.timeout) as shell:
+        with Shell(timeout=cfg.timeout) as shell:
             warm_up(shell, n=6, cmd=NOOP)
 
             for size in cfg.sizes:
@@ -486,7 +486,7 @@ def parse_args(argv=None):
     ap.add_argument("--types", action="store_true",
                     help="Also run command-type characterization.")
     ap.add_argument("--timeout", type=float, default=30.0,
-                    help="Shell timeout_seconds.")
+                    help="Shell timeout.")
     ap.add_argument("--num-shells", type=int, default=0,
                     help="Parallel shells to test (>1 enables scaling test).")
     ap.add_argument("--cmds-per-shell", type=int, default=50,

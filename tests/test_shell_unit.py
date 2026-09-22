@@ -14,6 +14,7 @@ from virtualshell.errors import (
     ExecutionError,
     ExecutionTimeoutError,
     PowerShellNotFoundError,
+    ScriptBlockDelegateWarning,
     VirtualShellError,
 )
 from virtualshell.shell import Shell, quote_pwsh_literal
@@ -73,7 +74,7 @@ class TestConfigWiring:
         Shell(
             powershell_path="C:/tools/pwsh.exe",
             working_directory=tmp_path,
-            timeout_seconds=12.7,
+            timeout=12.7,
             auto_restart_on_timeout=False,
             stdin_buffer_size=1024,
             cpp_module=fake_core,
@@ -84,6 +85,16 @@ class TestConfigWiring:
         assert cfg.timeout_seconds == 12  # truncated to int
         assert cfg.auto_restart_on_timeout is False
         assert cfg.stdin_buffer_size == 1024
+
+    def test_timeout_seconds_alias_still_wires_and_warns(self, fake_core):
+        with pytest.warns(DeprecationWarning, match="timeout_seconds"):
+            Shell(timeout_seconds=9, cpp_module=fake_core)
+        assert fake_core.last_shell.cfg.timeout_seconds == 9
+
+    def test_timeout_seconds_alias_overrides_timeout(self, fake_core):
+        with pytest.warns(DeprecationWarning):
+            Shell(timeout=3, timeout_seconds=8, cpp_module=fake_core)
+        assert fake_core.last_shell.cfg.timeout_seconds == 8
 
     def test_environment_is_copied(self, fake_core):
         env = {"A": "1"}
@@ -165,13 +176,13 @@ class TestLifecycle:
 
 class TestRun:
     def test_single_command_passes_string_and_timeout(self, fake_core):
-        sh = Shell(timeout_seconds=9, cpp_module=fake_core).start()
+        sh = Shell(timeout=9, cpp_module=fake_core).start()
         res = sh.run("Get-Date")
         assert res.out == "Get-Date"
         assert ("execute", "Get-Date", 9.0) in fake_core.last_shell.calls
 
     def test_explicit_timeout_overrides_default(self, fake_core):
-        sh = Shell(timeout_seconds=9, cpp_module=fake_core).start()
+        sh = Shell(timeout=9, cpp_module=fake_core).start()
         sh.run("x", timeout=2.5)
         assert ("execute", "x", 2.5) in fake_core.last_shell.calls
 
@@ -248,7 +259,7 @@ class TestRunAsync:
         assert fut.result(timeout=1).success
 
     def test_batch_forwards_options_and_reports_progress(self, fake_core):
-        sh = Shell(timeout_seconds=3, cpp_module=fake_core).start()
+        sh = Shell(timeout=3, cpp_module=fake_core).start()
         progress = []
         fut = sh.run_async(["a", "b"], callback=progress.append)
         results = fut.result(timeout=1)
@@ -450,3 +461,58 @@ class TestEditionDetection:
         fake_core.last_shell.start_result = False
         with pytest.raises(PowerShellNotFoundError, match="Windows PowerShell 5.1"):
             sh.start()
+
+
+class TestScriptBlockDelegateWarning:
+    """The heads-up for scriptblocks converted to .NET delegates/event handlers.
+
+    Such handlers can fire on a thread without a runspace and crash the host,
+    so every user-command path warns (but still executes)."""
+
+    def test_delegate_cast_warns_and_still_runs(self, fake_core):
+        sh = Shell(cpp_module=fake_core).start()
+        cmd = "[System.AppDomain]::CurrentDomain.add_AssemblyResolve([System.ResolveEventHandler]{ param($s,$e) $null })"
+        with pytest.warns(ScriptBlockDelegateWarning, match="delegate"):
+            res = sh.run(cmd)
+        assert res.out == cmd  # echoed by the fake backend: it did execute
+
+    def test_add_event_subscription_warns(self, fake_core):
+        sh = Shell(cpp_module=fake_core).start()
+        with pytest.warns(ScriptBlockDelegateWarning):
+            sh.run("$watcher.add_Changed({ Write-Host 'hit' })")
+
+    def test_generic_delegate_cast_warns(self, fake_core):
+        sh = Shell(cpp_module=fake_core).start()
+        with pytest.warns(ScriptBlockDelegateWarning):
+            sh.run("$cb = [Action[string]]{ param($s) $s }")
+
+    def test_batch_commands_are_screened(self, fake_core):
+        sh = Shell(cpp_module=fake_core).start()
+        with pytest.warns(ScriptBlockDelegateWarning):
+            sh.run(["Get-Date", "$x.add_Click({ 1 })"])
+
+    def test_run_async_is_screened(self, fake_core):
+        sh = Shell(cpp_module=fake_core).start()
+        with pytest.warns(ScriptBlockDelegateWarning):
+            sh.run_async("[System.EventHandler]{ param($s,$e) }").result()
+
+    def test_script_file_content_is_screened(self, fake_core, tmp_path):
+        script = tmp_path / "handler.ps1"
+        script.write_text("[System.ResolveEventHandler]{ param($s,$e) $null }\n",
+                          encoding="utf-8")
+        sh = Shell(cpp_module=fake_core).start()
+        with pytest.warns(ScriptBlockDelegateWarning):
+            sh.script(script)
+
+    @pytest.mark.parametrize("cmd", [
+        "Get-Date",
+        "[hashtable]@{ a = 1 }",
+        "if ($x -is [System.Action]) { 'yes' }",
+        "$sb = { Get-Date }",  # a plain scriptblock is fine
+        "Register-ObjectEvent $w Changed -Action { 1 }",  # engine-managed, safe
+    ])
+    def test_harmless_commands_do_not_warn(self, fake_core, cmd, recwarn):
+        sh = Shell(cpp_module=fake_core).start()
+        sh.run(cmd)
+        assert not [w for w in recwarn.list
+                    if issubclass(w.category, ScriptBlockDelegateWarning)]

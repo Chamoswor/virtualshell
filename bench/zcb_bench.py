@@ -110,7 +110,7 @@ def main():
     report = {"config": vars(args), "receive_bytes": {}, "receive_memoryview": {},
               "send": {}, "small_roundtrip": {}, "stdout_baseline": {}}
 
-    with Shell(timeout_seconds=120) as shell:
+    with Shell(timeout=120) as shell:
         with ZeroCopyBridge(shell, frame_mb=args.frame_mb, chunk_mb=args.chunk_mb) as bridge:
             # Warm-up: JIT, Add-Type, first mmap touch.
             bridge.send(b"warmup", "vs_bench_warm")

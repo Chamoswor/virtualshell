@@ -8,7 +8,7 @@
   - `"desktop"` – Windows PowerShell 5.1 (`powershell.exe`); Windows only, raises `ValueError` elsewhere
   - aliases `"pwsh"` (core) and `"powershell"` (desktop) are accepted
 - `working_directory: Optional[str|Path]` – child process CWD
-- `timeout_seconds: float = 5.0` – default per‑command timeout
+- `timeout: float = 5.0` – default per‑command timeout in seconds, used when a call has no `timeout=` of its own (deprecated alias: `timeout_seconds`)
 - `auto_restart_on_timeout: bool = True` – if `True`, backend restarts after timeout; Python side won’t raise timeout by default
 - `environment: Optional[Dict[str,str]]` – extra env vars for the child
 - `stdin_buffer_size: int = 65536` – size of the stdin pipe buffer in bytes

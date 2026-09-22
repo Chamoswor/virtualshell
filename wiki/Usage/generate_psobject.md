@@ -14,7 +14,7 @@
 from virtualshell import Shell
 from pathlib import Path
 
-shell = Shell(strip_results=True, timeout_seconds=60)
+shell = Shell(strip_results=True, timeout=60)
 shell.generate_psobject("System.Net.WebClient", Path("WebClient.py"))
 ```
 
@@ -32,7 +32,7 @@ If all strategies fail to materialise an object, a `RuntimeError` is raised list
 
 ## Customising Behaviour
 
-- **Timeouts:** Pass a higher `timeout_seconds` when constructing the shell if the target object takes time to create.
+- **Timeouts:** Pass a higher `timeout` when constructing the shell if the target object takes time to create.
 - **PowerShell host:** Use `Shell(powershell_edition="core")` / `"desktop"` to pick pwsh or Windows PowerShell 5.1, or `Shell(powershell_path="C:/Program Files/PowerShell/7/pwsh.exe")` to reference a specific installation.
 - **Result stripping:** `strip_results=True` trims trailing whitespace from PowerShell output; it is optional but helpful for clean JSON parsing.
 
@@ -199,7 +199,7 @@ Once you have generated a protocol (for example `WebClient.py`), you can attach 
 from virtualshell import Shell
 from WebClient import WebClient
 
-with Shell(strip_results=True, timeout_seconds=60) as sh:
+with Shell(strip_results=True, timeout=60) as sh:
 	sh.run("$client = New-Object System.Net.WebClient") # create the object in PS
 	client: WebClient = sh.make_proxy("WebClientProxy", "$client") # type-hinted proxy
 

@@ -38,7 +38,7 @@ This approach has significant overhead for large data. The Zero-Copy Bridge elim
 from virtualshell import Shell, ZeroCopyBridge, PSObject
 
 # Create shell and bridge (a unique channel file is created in the temp dir)
-with Shell(timeout_seconds=60) as shell:
+with Shell(timeout=60) as shell:
     with ZeroCopyBridge(shell, frame_mb=64, chunk_mb=4) as bridge:
         # Use bridge here
         pass
@@ -395,7 +395,7 @@ with Shell() as shell:
 from virtualshell import Shell, ZeroCopyBridge, PSObject
 from datetime import datetime
 
-with Shell(timeout_seconds=60) as shell:
+with Shell(timeout=60) as shell:
     # Gather data in PowerShell
     shell.run("""
     $data = Get-Process | Select-Object -First 10 | ForEach-Object {
@@ -445,7 +445,7 @@ data = b'0123456789ABCDEF' * 65536 * 32  # ~32 MB
 Path("large_file.bin").write_bytes(data)
 
 
-with Shell(timeout_seconds=120, set_UTF8=True, strip_results=True) as shell:
+with Shell(timeout=120, set_UTF8=True, strip_results=True) as shell:
 # Read file in Python
     file_data = Path("large_file.bin").read_bytes()
 
@@ -462,7 +462,7 @@ with Shell(timeout_seconds=120, set_UTF8=True, strip_results=True) as shell:
 ```python
 from virtualshell import Shell, ZeroCopyBridge, PSObject
 
-with Shell(timeout_seconds=60, set_UTF8=True, strip_results=True) as shell:
+with Shell(timeout=60, set_UTF8=True, strip_results=True) as shell:
     # Get processes from PowerShell - explicitly select properties we want
     shell.run("""
     $procs = Get-Process | Select-Object -First 5 -Property Name, Id, WorkingSet64
@@ -498,7 +498,7 @@ with Shell(timeout_seconds=60, set_UTF8=True, strip_results=True) as shell:
 ```python
 from virtualshell import Shell, ZeroCopyBridge, PSObject
 
-with Shell(timeout_seconds=60, set_UTF8=True, strip_results=True) as shell:
+with Shell(timeout=60, set_UTF8=True, strip_results=True) as shell:
     # Get processes from PowerShell - explicitly select properties we want
     shell.run("""
     $complex = [PSCustomObject]@{

@@ -309,7 +309,7 @@ from conftest import integration  # noqa: E402  (pwsh and/or Windows PowerShell 
 def shell(edition):
     from virtualshell import Shell
 
-    sh = Shell(timeout_seconds=60, powershell_edition=edition).start()
+    sh = Shell(timeout=60, powershell_edition=edition).start()
     yield sh
     sh.stop(force=True)
 
@@ -553,7 +553,7 @@ class TestGenerateReconstruction:
         assert "Version=" in proto.__ps_assembly_name__
 
         # Brand-new host: nothing loaded, no $vs_widget. The stub must suffice.
-        with Shell(timeout_seconds=60, powershell_edition=edition) as fresh:
+        with Shell(timeout=60, powershell_edition=edition) as fresh:
             widget = fresh.make_proxy(proto)
             assert widget.Hello("x") == "hi x"
             assert widget.Value == 7

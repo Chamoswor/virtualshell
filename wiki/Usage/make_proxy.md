@@ -253,7 +253,7 @@ count = ms.Read(buffer, 0, 5)           # buffer now holds the bytes read
 ### Batch calls with proxy_multi_call
 
 ```python
-with Shell(timeout_seconds=120) as sh:
+with Shell(timeout=120) as sh:
     sw = sh.make_proxy("", "System.IO.StreamWriter('file.txt')")
     lines = [f"Line {i}" for i in range(1000)]
 

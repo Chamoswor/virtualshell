@@ -26,6 +26,27 @@ sh.run("1+1")       # auto-relaunch; session state is gone unless a
                     # save_session()/checkpoint() snapshot exists
 ```
 
+A common way to crash the host by accident is handing a PowerShell
+scriptblock to .NET as a delegate or event handler — a cast like
+`[System.ResolveEventHandler]{ ... }` or a subscription like
+`$obj.add_Changed({ ... })`. The delegate can fire on a thread that has no
+runspace, which kills the process with a `StackOverflowException`.
+virtualshell recognizes the pattern before execution and emits a
+`ScriptBlockDelegateWarning` (a `UserWarning`; the command still runs):
+
+```python
+import warnings
+from virtualshell import ScriptBlockDelegateWarning
+
+with warnings.catch_warnings():
+    warnings.simplefilter("error", ScriptBlockDelegateWarning)  # opt in to hard-fail
+    sh.run("$AppDomain.add_AssemblyResolve([System.ResolveEventHandler]{ ... })")
+```
+
+The safe pattern is to compile the handler in C# via `Add-Type` and attach
+that compiled delegate instead; `Register-ObjectEvent` (whose handlers run on
+the engine's event queue) is also safe.
+
 **Blocked prompts**
 
 The host runs with `-NonInteractive`: `Read-Host`, `Get-Credential`,

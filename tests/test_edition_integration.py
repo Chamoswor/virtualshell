@@ -20,7 +20,7 @@ pytestmark = integration
 def shell(edition):
     from virtualshell import Shell
 
-    sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+    sh = Shell(timeout=30, powershell_edition=edition).start()
     yield sh
     sh.stop(force=True)
 
@@ -70,7 +70,7 @@ class TestAutoEdition:
         from virtualshell import Shell
 
         expected = "core" if "core" in EDITIONS else "desktop"
-        with Shell(timeout_seconds=30) as sh:      # default powershell_edition="auto"
+        with Shell(timeout=30) as sh:      # default powershell_edition="auto"
             assert sh.configured_edition == "auto"
             assert sh.edition == expected
 
@@ -80,7 +80,7 @@ class TestAutoEdition:
         pwsh = shutil.which("pwsh")
         if not pwsh or "desktop" not in EDITIONS:
             pytest.skip("needs both pwsh and Windows PowerShell installed")
-        with Shell(timeout_seconds=30, powershell_path=pwsh,
+        with Shell(timeout=30, powershell_path=pwsh,
                    powershell_edition="desktop") as sh:
             assert sh.edition == "core"
             assert os.path.normcase(sh.powershell_path) == os.path.normcase(pwsh)

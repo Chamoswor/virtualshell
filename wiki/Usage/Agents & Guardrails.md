@@ -64,10 +64,21 @@ sh.run_objects("Get-Process", select=["Name", "Id"], first=5)
 sh.run_objects("Get-Service", select="Status", first=3)
 sh.run_objects("1..10", first=3)          # [1, 2, 3]
 sh.run_objects("@{a=@{b=1}}", depth=3)    # nested dicts
+
+sh.run_objects("Get-Date")                # ['2026-09-22T14:03:07.1234567+02:00']
+sh.run_objects("Get-Item .")              # ['F:\\Git\\repo'] - path, not a property bag
 ```
 
 - Serialization happens in the session (`ConvertTo-Json`), parsing in Python —
   no screen scraping, and always a list.
+- Values are normalized so output is compact and identical on both editions:
+  DateTime/DateTimeOffset → ISO-8601 strings (never the PS 5.1 `/Date(...)/`
+  form), enums → their name, Guid/TimeSpan/Uri/Version/IPAddress → strings,
+  FileInfo/DirectoryInfo → the full path string. Dictionaries, arrays and
+  PSCustomObjects expand as usual; any other rich .NET object at the `depth`
+  boundary becomes its `ToString()` instead of a property bag.
+- `raw=True` skips normalization (plain `ConvertTo-Json`: full property bags,
+  edition-dependent date formats; faster for very large dumps).
 - `select=` / `first=` keep results small at the source.
 - Runs in the current scope: assignments inside the command persist.
 - Errors are strict by default: terminating errors and stderr raise

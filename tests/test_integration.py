@@ -23,7 +23,7 @@ pytestmark = integration
 def shell(edition):
     from virtualshell import Shell
 
-    sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+    sh = Shell(timeout=30, powershell_edition=edition).start()
     yield sh
     sh.stop(force=True)
 
@@ -139,7 +139,7 @@ class TestSeparateInstances:
     def test_environment_variables(self, edition):
         from virtualshell import Shell
 
-        with Shell(timeout_seconds=30, powershell_edition=edition,
+        with Shell(timeout=30, powershell_edition=edition,
                    environment={"VS_TEST_ENV": "hello-env"}) as sh:
             res = sh.run("$env:VS_TEST_ENV")
             assert res.out.strip() == "hello-env"
@@ -147,7 +147,7 @@ class TestSeparateInstances:
     def test_working_directory(self, tmp_path, edition):
         from virtualshell import Shell
 
-        with Shell(timeout_seconds=30, powershell_edition=edition,
+        with Shell(timeout=30, powershell_edition=edition,
                    working_directory=tmp_path) as sh:
             res = sh.run("(Get-Location).Path")
             assert res.out.strip().rstrip("\\/") == str(tmp_path.resolve()).rstrip("\\/")
@@ -155,14 +155,14 @@ class TestSeparateInstances:
     def test_strip_results(self, edition):
         from virtualshell import Shell
 
-        with Shell(timeout_seconds=30, powershell_edition=edition, strip_results=True) as sh:
+        with Shell(timeout=30, powershell_edition=edition, strip_results=True) as sh:
             res = sh.run("Write-Output 'clean'")
             assert res.out == "clean"
 
     def test_stop_removes_session_snapshot(self, edition):
         from virtualshell import Shell
 
-        sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+        sh = Shell(timeout=30, powershell_edition=edition).start()
         session_path = sh.session_path
         sh.save_session(timeout=60)
         assert session_path.exists()
@@ -180,7 +180,7 @@ class TestHostCrash:
     def test_crash_fails_fast_and_start_recovers(self, edition):
         from virtualshell import ExitCode, Shell
 
-        sh = Shell(timeout_seconds=30, powershell_edition=edition).start()
+        sh = Shell(timeout=30, powershell_edition=edition).start()
         try:
             t0 = time.time()
             res = sh.run("Stop-Process -Id $PID -Force")
@@ -204,7 +204,7 @@ class TestHostCrash:
         from virtualshell import Shell
 
         t0 = time.time()
-        sh = Shell(timeout_seconds=30, powershell_edition=edition,
+        sh = Shell(timeout=30, powershell_edition=edition,
                    initial_commands=["Stop-Process -Id $PID -Force"])
         sh.start()
         assert time.time() - t0 < 10
@@ -216,7 +216,7 @@ class TestHostCrash:
         # shutdown, which no in-process assertion can observe.
         script = (
             "from virtualshell import Shell\n"
-            f"sh = Shell(timeout_seconds=30, powershell_edition={edition!r},\n"
+            f"sh = Shell(timeout=30, powershell_edition={edition!r},\n"
             "           initial_commands=['Stop-Process -Id $PID -Force'])\n"
             "sh.start()\n"
             "r = sh.run('1 + 1')\n"

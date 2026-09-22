@@ -1,8 +1,10 @@
-"""Typed exceptions raised by virtualshell.
+"""Typed exceptions and warnings raised by virtualshell.
 
 Every error raised by this library derives from ``VirtualShellError``, so a
 single ``except VirtualShellError`` catches them all while the subclasses stay
-precise enough for targeted retry / telemetry policies.
+precise enough for targeted retry / telemetry policies. Warning categories
+(``ScriptBlockDelegateWarning``) derive from ``UserWarning`` instead, so they
+flow through the standard :mod:`warnings` machinery.
 """
 
 
@@ -51,3 +53,16 @@ class PolicyViolationError(VirtualShellError):
         self.command = command
         self.reason = reason
         self.matched = tuple(matched)
+
+
+class ScriptBlockDelegateWarning(UserWarning):
+    """A command appears to convert a PowerShell scriptblock into a .NET
+    delegate or event handler (``[SomeEventHandler]{ ... }`` casts,
+    ``$obj.add_Event({ ... })``).
+
+    Such handlers run whenever .NET fires the event — often on a thread that
+    has no PowerShell runspace, which crashes the hidden host process
+    (typically with a ``StackOverflowException``) and loses session state.
+    The command still executes; this is a heads-up, not a block. Prefer a
+    handler compiled in C# via ``Add-Type`` and attach that instead.
+    """

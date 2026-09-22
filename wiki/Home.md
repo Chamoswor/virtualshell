@@ -5,7 +5,7 @@
 **Highlights**
 - Thin Python façade over a fast C++ core
 - Single commands, batches, scripts (positional or named args)
-- Structured results: `run_objects()` returns Python objects, not text to parse
+- Structured results: `run_objects()` returns Python objects, not text to parse — normalized (ISO-8601 dates, paths and enum names as strings) on both editions
 - Futures‑based async with optional callbacks
 - Timeouts and automatic restart of the backend process (opt‑in)
 - Typed error translation (timeout/error/blocked prompt) and simple success checks
@@ -19,3 +19,4 @@
 - Configurable environment, working directory, UTF-8 mode, and more
 
 New in 1.3: see [Agents & Guardrails](Agents-&-Guardrails).
+New in 1.4: `Shell(timeout=...)` (was `timeout_seconds`), normalized `run_objects` values, and `ScriptBlockDelegateWarning` — see the [Changelog](Changelog).
