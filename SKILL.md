@@ -37,8 +37,7 @@ with Shell(timeout=30) as sh:       # default per-command timeout in seconds
 ```
 
 `Shell(timeout=...)` (default 5.0 s) is the session default; every execution
-method also takes a per-call `timeout=`. (`timeout_seconds=` is a deprecated
-alias for the constructor argument.)
+method also takes a per-call `timeout=`.
 
 Default error behavior differs: `run()` returns failures as data
 (`success=False`, text in `err`) unless you pass `raise_on_error=True`, while
